@@ -1,0 +1,22 @@
+# Edge Workspace Manager - Git Ignore
+# 敏感配置文件不上传
+.env
+
+# 编辑器与系统文件
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# 依赖与构建产物
+node_modules/
+dist/
+build/
+*.zip
+*.crx
+
+# 日志文件
+*.log

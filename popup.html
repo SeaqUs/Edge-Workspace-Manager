@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Edge Workspace Manager</title>
+  <link rel="stylesheet" href="css/popup.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- 头部标题与新建按钮 -->
+    <header class="app-header">
+      <h1 class="app-title">工作区管理</h1>
+      <button id="btn-create-workspace" class="btn btn-primary" type="button">新建工作区</button>
+    </header>
+
+    <!-- 新建工作区输入区 -->
+    <section id="create-panel" class="create-panel hidden">
+      <input id="input-workspace-name" type="text" placeholder="输入工作区名称" autocomplete="off">
+      <div class="button-row">
+        <button id="btn-confirm-create" class="btn btn-primary" type="button">确认</button>
+        <button id="btn-cancel-create" class="btn btn-secondary" type="button">取消</button>
+      </div>
+    </section>
+
+    <!-- 工作区列表 -->
+    <main id="workspace-list" class="workspace-list">
+      <!-- 动态渲染工作区卡片 -->
+    </main>
+
+    <!-- 空状态提示 -->
+    <div id="empty-state" class="empty-state hidden">
+      <p>暂无工作区，点击右上角按钮创建。</p>
+    </div>
+
+    <!-- 错误提示 -->
+    <div id="error-message" class="error-message hidden"></div>
+  </div>
+
+  <!-- 引入数据层与 popup 逻辑 -->
+  <script src="js/dataStore.js"></script>
+  <script src="js/popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "Edge Workspace Manager",
+  "version": "1.0.0",
+  "description": "基于本地影子数据库的 Edge 工作区与标签页管理扩展",
+  "permissions": [
+    "storage",
+    "tabs",
+    "windows",
+    "sessions"
+  ],
+  "host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon.svg",
+      "32": "icons/icon.svg",
+      "48": "icons/icon.svg",
+      "128": "icons/icon.svg"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "16": "icons/icon.svg",
+    "32": "icons/icon.svg",
+    "48": "icons/icon.svg",
+    "128": "icons/icon.svg"
+  },
+  "default_locale": "zh_CN"
+}
