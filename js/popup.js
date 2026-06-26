@@ -143,7 +143,7 @@
     const nameEl = document.createElement('div');
     nameEl.className = 'workspace-name';
     nameEl.textContent = ws.name;
-    nameEl.title = ws.windowId ? '点击聚焦窗口' : '点击打开工作区';
+    nameEl.title = ws.windowId ? '点击关闭工作区窗口' : '点击打开工作区';
     nameEl.addEventListener('click', () => toggleWorkspace(ws.id));
 
     const actionsEl = document.createElement('div');
@@ -152,7 +152,7 @@
     const openBtn = document.createElement('button');
     openBtn.className = 'btn btn-small btn-primary';
     openBtn.type = 'button';
-    openBtn.textContent = ws.windowId ? '聚焦' : '打开';
+    openBtn.textContent = ws.windowId ? '关闭' : '打开';
     openBtn.addEventListener('click', () => toggleWorkspace(ws.id));
 
     const deleteBtn = document.createElement('button');
