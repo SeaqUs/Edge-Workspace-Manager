@@ -98,6 +98,70 @@
         };
         windows.set(windowId, win);
         return Promise.resolve(win);
+      },
+
+      getAll(options) {
+        // 返回两个模拟普通窗口：一个 GitHub 窗口，一个 Bing 窗口
+        const windowAId = nextWindowId++;
+        const windowBId = nextWindowId++;
+        const popupWindowId = nextWindowId++;
+
+        const windowA = {
+          id: windowAId,
+          tabs: [
+            {
+              id: nextTabId++,
+              url: 'https://github.com',
+              title: 'GitHub',
+              windowId: windowAId,
+              index: 0,
+              pinned: false,
+              favIconUrl: 'https://github.com/favicon.ico'
+            }
+          ],
+          focused: true,
+          type: 'normal'
+        };
+
+        const windowB = {
+          id: windowBId,
+          tabs: [
+            {
+              id: nextTabId++,
+              url: 'https://www.bing.com',
+              title: 'Bing',
+              windowId: windowBId,
+              index: 0,
+              pinned: false,
+              favIconUrl: null
+            }
+          ],
+          focused: false,
+          type: 'normal'
+        };
+
+        const popupWindow = {
+          id: popupWindowId,
+          tabs: [
+            {
+              id: nextTabId++,
+              url: 'https://popup.example.com',
+              title: 'Popup',
+              windowId: popupWindowId,
+              index: 0,
+              pinned: false,
+              favIconUrl: null
+            }
+          ],
+          focused: false,
+          type: 'popup'
+        };
+
+        windows.set(windowAId, windowA);
+        windows.set(windowBId, windowB);
+        windows.set(popupWindowId, popupWindow);
+
+        return Promise.resolve([windowA, windowB, popupWindow]);
       }
     },
 

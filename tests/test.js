@@ -96,8 +96,14 @@
     assert(imported.tabs.length === 2, '导入当前窗口包含 2 个标签页');
     assert(imported.tabs[0].realTabId, '导入的标签页记录 realTabId');
 
+    // 测试 11：导入所有窗口（应过滤 popup 类型）
+    const allImported = await importAllWindows();
+    assert(allImported.length === 2, 'importAllWindows 导入 2 个普通窗口，过滤 popup');
+    assert(allImported.some(w => w.tabs[0].url === 'https://github.com'), '导入结果包含 GitHub 窗口');
+    assert(allImported.some(w => w.tabs[0].url === 'https://www.bing.com'), '导入结果包含 Bing 窗口');
+
     const finalData = await loadWorkspaces();
-    assert(finalData.workspaces.length === 2, '最终存在 2 个工作区');
+    assert(finalData.workspaces.length === 4, '最终存在 4 个工作区（1 创建 + 1 当前窗口导入 + 2 全部窗口导入）');
 
     // 输出汇总
     summaryEl.textContent = `测试完成：通过 ${passCount} 项，失败 ${failCount} 项`;

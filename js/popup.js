@@ -516,6 +516,28 @@
   }
 
   /**
+   * 导入所有打开的浏览器窗口为工作区
+   * 适用于一次性迁移 Edge 原生工作区（以窗口形式存在）
+   */
+  async function importAllWindows() {
+    if (!confirm('确定导入所有打开的窗口吗？每个窗口将生成一个独立工作区。')) {
+      return;
+    }
+
+    try {
+      const response = await sendMessage({ type: 'IMPORT_ALL_WINDOWS' });
+      if (response && response.success) {
+        alert(`成功导入 ${response.count} 个窗口为工作区。`);
+        await loadAndRender();
+      } else {
+        showError(response && response.error ? response.error : '未找到可导入的窗口');
+      }
+    } catch (error) {
+      showError(`导入所有窗口失败: ${error.message}`);
+    }
+  }
+
+  /**
    * 向后台 Service Worker 发送消息
    * @param {object} message - 消息对象
    * @returns {Promise<object>} 响应对象
@@ -558,17 +580,27 @@
   }
 
   /**
-   * 在头部追加“导入当前窗口”按钮
+   * 在头部追加导入按钮组
    * 因 popup.js 在 DOM 构建后引入，此处直接操作 header
    */
   const appHeader = document.querySelector('.app-header');
   if (appHeader) {
-    const importBtn = document.createElement('button');
-    importBtn.className = 'btn btn-secondary';
-    importBtn.type = 'button';
-    importBtn.textContent = '导入当前窗口';
-    importBtn.style.marginLeft = '8px';
-    importBtn.addEventListener('click', importCurrentWindow);
-    appHeader.appendChild(importBtn);
+    const importCurrentBtn = document.createElement('button');
+    importCurrentBtn.className = 'btn btn-secondary';
+    importCurrentBtn.type = 'button';
+    importCurrentBtn.textContent = '导入当前窗口';
+    importCurrentBtn.style.marginLeft = '8px';
+    importCurrentBtn.addEventListener('click', importCurrentWindow);
+
+    const importAllBtn = document.createElement('button');
+    importAllBtn.className = 'btn btn-secondary';
+    importAllBtn.type = 'button';
+    importAllBtn.textContent = '导入所有窗口';
+    importAllBtn.title = '将所有打开的 Edge 窗口导入为扩展工作区';
+    importAllBtn.style.marginLeft = '8px';
+    importAllBtn.addEventListener('click', importAllWindows);
+
+    appHeader.appendChild(importCurrentBtn);
+    appHeader.appendChild(importAllBtn);
   }
 })();

@@ -351,6 +351,58 @@ async function openWorkspace(workspaceId) {
 }
 
 /**
+ * 将 chrome 窗口对象转换为扩展内部工作区对象
+ * @param {object} chromeWindow - chrome.windows API 返回的窗口对象
+ * @param {string} [name] - 工作区名称，缺省使用窗口标题或时间
+ * @returns {object|null} 转换后的工作区对象
+ */
+function convertChromeWindowToWorkspace(chromeWindow, name) {
+  if (!chromeWindow || !chromeWindow.tabs || chromeWindow.tabs.length === 0) {
+    return null;
+  }
+
+  const workspace = {
+    id: generateId('ws'),
+    name: name ? name.trim() : (chromeWindow.title || `导入工作区 ${new Date().toLocaleString('zh-CN')}`),
+    icon: null,
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+    windowId: chromeWindow.id, // 直接关联原始窗口
+    tabs: [],
+    groups: [],
+    layout: {
+      sortBy: 'title',
+      sortOrder: 'asc'
+    }
+  };
+
+  // 将 chrome 标签页转换为影子标签页，并记录真实标签页 ID
+  workspace.tabs = chromeWindow.tabs.map((chromeTab) => {
+    let hostname = '';
+    try {
+      if (chromeTab.url) {
+        hostname = new URL(chromeTab.url).hostname;
+      }
+    } catch (error) {
+      // 忽略无效 URL
+    }
+
+    return {
+      id: generateId('tab'),
+      url: chromeTab.url || 'edge://newtab/',
+      title: chromeTab.title || chromeTab.url || '新标签页',
+      favIconUrl: chromeTab.favIconUrl || (hostname ? `https://www.google.com/s2/favicons?domain=${hostname}` : null),
+      groupId: null,
+      pinned: chromeTab.pinned || false,
+      realTabId: chromeTab.id,
+      createdAt: nowIso()
+    };
+  });
+
+  return workspace;
+}
+
+/**
  * 从当前浏览器窗口导入为工作区
  * 读取当前活动窗口的所有标签页，创建一个新的影子工作区
  * @param {string} [name] - 工作区名称，缺省使用窗口标题或当前时间
@@ -360,56 +412,57 @@ async function importCurrentWindow(name) {
   try {
     // 获取最近一次聚焦的窗口（popup 打开前的活动窗口），包含标签页信息
     const currentWindow = await chrome.windows.getLastFocused({ populate: true });
-    if (!currentWindow || !currentWindow.tabs || currentWindow.tabs.length === 0) {
+    const newWorkspace = convertChromeWindowToWorkspace(currentWindow, name);
+    if (!newWorkspace) {
       console.warn('[Edge Workspace Manager] 当前窗口无标签页，无法导入');
       return null;
     }
 
     const data = await loadWorkspaces();
-    const newWorkspace = {
-      id: generateId('ws'),
-      name: name ? name.trim() : `导入工作区 ${new Date().toLocaleString('zh-CN')}`,
-      icon: null,
-      createdAt: nowIso(),
-      updatedAt: nowIso(),
-      windowId: currentWindow.id, // 直接关联当前窗口
-      tabs: [],
-      groups: [],
-      layout: {
-        sortBy: 'title',
-        sortOrder: 'asc'
-      }
-    };
-
-    // 将当前窗口标签页转换为影子标签页，并记录真实标签页 ID
-    newWorkspace.tabs = currentWindow.tabs.map((chromeTab) => {
-      let hostname = '';
-      try {
-        if (chromeTab.url) {
-          hostname = new URL(chromeTab.url).hostname;
-        }
-      } catch (error) {
-        // 忽略无效 URL
-      }
-
-      return {
-        id: generateId('tab'),
-        url: chromeTab.url || 'edge://newtab/',
-        title: chromeTab.title || chromeTab.url || '新标签页',
-        favIconUrl: chromeTab.favIconUrl || (hostname ? `https://www.google.com/s2/favicons?domain=${hostname}` : null),
-        groupId: null,
-        pinned: chromeTab.pinned || false,
-        realTabId: chromeTab.id,
-        createdAt: nowIso()
-      };
-    });
-
     data.workspaces.push(newWorkspace);
     await saveWorkspaces(data);
     return newWorkspace;
   } catch (error) {
     console.error('[Edge Workspace Manager] 导入当前窗口失败:', error);
     return null;
+  }
+}
+
+/**
+ * 导入所有打开的浏览器窗口为扩展工作区
+ * 仅导入 type 为 'normal' 的窗口，排除弹出窗/开发者工具等
+ * @returns {Promise<object[]>} 新建的工作区对象数组
+ */
+async function importAllWindows() {
+  try {
+    // 获取所有窗口，包含标签页信息
+    const allWindows = await chrome.windows.getAll({ populate: true });
+    const normalWindows = allWindows.filter(w => w.type === 'normal' && w.tabs && w.tabs.length > 0);
+
+    if (normalWindows.length === 0) {
+      console.warn('[Edge Workspace Manager] 未发现可导入的普通窗口');
+      return [];
+    }
+
+    const data = await loadWorkspaces();
+    const importedWorkspaces = [];
+
+    normalWindows.forEach((chromeWindow, index) => {
+      const newWorkspace = convertChromeWindowToWorkspace(
+        chromeWindow,
+        `导入工作区 ${index + 1}`
+      );
+      if (newWorkspace) {
+        data.workspaces.push(newWorkspace);
+        importedWorkspaces.push(newWorkspace);
+      }
+    });
+
+    await saveWorkspaces(data);
+    return importedWorkspaces;
+  } catch (error) {
+    console.error('[Edge Workspace Manager] 导入所有窗口失败:', error);
+    return [];
   }
 }
 
@@ -464,6 +517,7 @@ if (typeof module !== 'undefined' && module.exports) {
     openWorkspace,
     closeWorkspace,
     importCurrentWindow,
+    importAllWindows,
     generateId,
     nowIso
   };

@@ -217,6 +217,12 @@ async function handleMessage(request, sender, sendResponse) {
         break;
       }
 
+      case 'IMPORT_ALL_WINDOWS': {
+        const imported = await importAllWindows();
+        sendResponse({ success: imported.length > 0, workspaces: imported, count: imported.length });
+        break;
+      }
+
       default:
         sendResponse({ success: false, error: '未知消息类型' });
     }
