@@ -45,7 +45,13 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
   margin-bottom: var(--spacing);
+}
+
+.app-header .app-title {
+  margin-right: auto;
 }
 
 .app-title {
@@ -261,6 +267,78 @@ body {
   color: var(--danger-color);
   border-radius: 4px;
   font-size: 13px;
+}
+
+/* 分组区域 */
+.group-section {
+  padding: 8px var(--spacing);
+  border-bottom: 1px solid var(--border-color);
+  background-color: #fafafa;
+}
+
+.group-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.group-section-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.group-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.group-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.group-color-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.group-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.group-count {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+/* 标签页分组下拉框 */
+.tab-group-select {
+  flex-shrink: 0;
+  max-width: 80px;
+  padding: 2px 4px;
+  font-size: 11px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background-color: #ffffff;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.tab-group-select:focus {
+  outline: none;
+  border-color: var(--primary-color);
 }
 
 .hidden {

@@ -166,13 +166,18 @@
     header.appendChild(nameEl);
     header.appendChild(actionsEl);
 
-    // 元信息：标签页数量与窗口状态
+    // 元信息：标签页数量、分组数量与窗口状态
     const meta = document.createElement('div');
     meta.className = 'workspace-meta';
+    const groupCount = ws.groups ? ws.groups.length : 0;
     meta.innerHTML = `
       <span>标签页: ${ws.tabs ? ws.tabs.length : 0}</span>
+      <span>分组: ${groupCount}</span>
       <span>状态: ${ws.windowId ? '已打开' : '未打开'}</span>
     `;
+
+    // 分组区域
+    const groupSection = buildGroupSection(ws);
 
     // 标签页列表
     const tabList = document.createElement('div');
@@ -180,7 +185,7 @@
 
     if (ws.tabs && ws.tabs.length > 0) {
       ws.tabs.forEach((tab) => {
-        const tabItem = buildTabItem(ws.id, tab);
+        const tabItem = buildTabItem(ws, tab);
         tabList.appendChild(tabItem);
       });
     }
@@ -213,6 +218,7 @@
 
     card.appendChild(header);
     card.appendChild(meta);
+    card.appendChild(groupSection);
     card.appendChild(tabList);
     card.appendChild(addTabRow);
 
@@ -220,12 +226,78 @@
   }
 
   /**
+   * 构建工作区分组区域 DOM
+   * @param {object} ws - 工作区数据对象
+   * @returns {HTMLElement} 分组区域根元素
+   */
+  function buildGroupSection(ws) {
+    const section = document.createElement('div');
+    section.className = 'group-section';
+
+    // 分组标题行
+    const headerRow = document.createElement('div');
+    headerRow.className = 'group-header-row';
+
+    const title = document.createElement('span');
+    title.className = 'group-section-title';
+    title.textContent = '分组';
+
+    const createGroupBtn = document.createElement('button');
+    createGroupBtn.className = 'btn btn-small btn-secondary';
+    createGroupBtn.type = 'button';
+    createGroupBtn.textContent = '新建分组';
+    createGroupBtn.addEventListener('click', () => {
+      const name = prompt('请输入分组名称');
+      if (name && name.trim()) {
+        createGroup(ws.id, name.trim());
+      }
+    });
+
+    headerRow.appendChild(title);
+    headerRow.appendChild(createGroupBtn);
+    section.appendChild(headerRow);
+
+    // 分组列表
+    if (ws.groups && ws.groups.length > 0) {
+      const list = document.createElement('div');
+      list.className = 'group-list';
+
+      ws.groups.forEach((group) => {
+        const groupItem = document.createElement('div');
+        groupItem.className = 'group-item';
+
+        const colorDot = document.createElement('span');
+        colorDot.className = 'group-color-dot';
+        colorDot.style.backgroundColor = group.color || '#999999';
+
+        const groupName = document.createElement('span');
+        groupName.className = 'group-name';
+        groupName.textContent = group.name;
+
+        const tabCount = ws.tabs.filter(t => t.groupId === group.id).length;
+        const countBadge = document.createElement('span');
+        countBadge.className = 'group-count';
+        countBadge.textContent = `${tabCount} 标签页`;
+
+        groupItem.appendChild(colorDot);
+        groupItem.appendChild(groupName);
+        groupItem.appendChild(countBadge);
+        list.appendChild(groupItem);
+      });
+
+      section.appendChild(list);
+    }
+
+    return section;
+  }
+
+  /**
    * 构建单个标签页 DOM
-   * @param {string} workspaceId - 工作区 ID
+   * @param {object} ws - 标签页所属工作区对象
    * @param {object} tab - 标签页数据对象
    * @returns {HTMLElement} 标签页根元素
    */
-  function buildTabItem(workspaceId, tab) {
+  function buildTabItem(ws, tab) {
     const item = document.createElement('div');
     item.className = 'tab-item';
 
@@ -239,22 +311,49 @@
     title.textContent = tab.title || tab.url;
     title.title = tab.url;
 
+    // 分组选择下拉框
+    const groupSelect = document.createElement('select');
+    groupSelect.className = 'tab-group-select';
+    groupSelect.title = '分配到分组';
+
+    const emptyOption = document.createElement('option');
+    emptyOption.value = '';
+    emptyOption.textContent = '未分组';
+    groupSelect.appendChild(emptyOption);
+
+    if (ws.groups && ws.groups.length > 0) {
+      ws.groups.forEach((group) => {
+        const option = document.createElement('option');
+        option.value = group.id;
+        option.textContent = group.name;
+        if (tab.groupId === group.id) {
+          option.selected = true;
+        }
+        groupSelect.appendChild(option);
+      });
+    }
+
+    groupSelect.addEventListener('change', () => {
+      assignTabToGroup(ws.id, tab.id, groupSelect.value || null);
+    });
+
     const removeBtn = document.createElement('button');
     removeBtn.className = 'tab-remove';
     removeBtn.type = 'button';
     removeBtn.textContent = '×';
     removeBtn.title = '移除标签页';
-    removeBtn.addEventListener('click', () => removeTab(workspaceId, tab.id));
+    removeBtn.addEventListener('click', () => removeTab(ws.id, tab.id));
 
     item.appendChild(favicon);
     item.appendChild(title);
+    item.appendChild(groupSelect);
     item.appendChild(removeBtn);
 
     return item;
   }
 
   /**
-   * 打开或聚焦工作区窗口
+   * 打开或关闭工作区窗口
    * @param {string} workspaceId - 工作区 ID
    */
   async function toggleWorkspace(workspaceId) {
@@ -349,6 +448,74 @@
   }
 
   /**
+   * 创建分组
+   * @param {string} workspaceId - 工作区 ID
+   * @param {string} groupName - 分组名称
+   */
+  async function createGroup(workspaceId, groupName) {
+    try {
+      const response = await sendMessage({
+        type: 'CREATE_GROUP',
+        workspaceId,
+        groupName
+      });
+      if (response && response.success) {
+        await loadAndRender();
+      } else {
+        showError(response && response.error ? response.error : '创建分组失败');
+      }
+    } catch (error) {
+      showError(`创建分组失败: ${error.message}`);
+    }
+  }
+
+  /**
+   * 分配标签页到分组
+   * @param {string} workspaceId - 工作区 ID
+   * @param {string} tabId - 标签页内部 ID
+   * @param {string|null} groupId - 分组 ID
+   */
+  async function assignTabToGroup(workspaceId, tabId, groupId) {
+    try {
+      const response = await sendMessage({
+        type: 'ASSIGN_TAB_TO_GROUP',
+        workspaceId,
+        tabId,
+        groupId
+      });
+      if (response && response.success) {
+        await loadAndRender();
+      } else {
+        showError(response && response.error ? response.error : '分配分组失败');
+      }
+    } catch (error) {
+      showError(`分配分组失败: ${error.message}`);
+    }
+  }
+
+  /**
+   * 导入当前浏览器窗口为工作区
+   */
+  async function importCurrentWindow() {
+    const name = prompt('请输入导入工作区的名称（可留空使用默认名称）');
+    if (name === null) return; // 用户取消
+
+    try {
+      const response = await sendMessage({
+        type: 'IMPORT_CURRENT_WINDOW',
+        name: name.trim()
+      });
+      if (response && response.success) {
+        await loadAndRender();
+      } else {
+        showError(response && response.error ? response.error : '导入当前窗口失败');
+      }
+    } catch (error) {
+      showError(`导入当前窗口失败: ${error.message}`);
+    }
+  }
+
+  /**
    * 向后台 Service Worker 发送消息
    * @param {object} message - 消息对象
    * @returns {Promise<object>} 响应对象
@@ -388,5 +555,20 @@
   function hideError() {
     errorMessageEl.classList.add('hidden');
     errorMessageEl.textContent = '';
+  }
+
+  /**
+   * 在头部追加“导入当前窗口”按钮
+   * 因 popup.js 在 DOM 构建后引入，此处直接操作 header
+   */
+  const appHeader = document.querySelector('.app-header');
+  if (appHeader) {
+    const importBtn = document.createElement('button');
+    importBtn.className = 'btn btn-secondary';
+    importBtn.type = 'button';
+    importBtn.textContent = '导入当前窗口';
+    importBtn.style.marginLeft = '8px';
+    importBtn.addEventListener('click', importCurrentWindow);
+    appHeader.appendChild(importBtn);
   }
 })();

@@ -211,6 +211,12 @@ async function handleMessage(request, sender, sendResponse) {
         break;
       }
 
+      case 'IMPORT_CURRENT_WINDOW': {
+        const ws = await importCurrentWindow(request.name);
+        sendResponse({ success: !!ws, workspace: ws });
+        break;
+      }
+
       default:
         sendResponse({ success: false, error: '未知消息类型' });
     }
