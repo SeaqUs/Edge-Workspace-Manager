@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>Edge Workspace Manager - 数据层测试</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+      padding: 24px;
+      line-height: 1.6;
+    }
+    h1 { font-size: 20px; }
+    .pass { color: #34a853; }
+    .fail { color: #ea4335; }
+    .log { margin: 4px 0; font-family: monospace; }
+    #summary { font-weight: bold; margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <h1>Edge Workspace Manager - 数据层测试</h1>
+  <div id="results"></div>
+  <div id="summary"></div>
+
+  <!-- 引入 mock chrome API、数据层与测试脚本 -->
+  <script src="mock-chrome.js"></script>
+  <script src="../js/dataStore.js"></script>
+  <script src="test.js"></script>
+</body>
+</html>
