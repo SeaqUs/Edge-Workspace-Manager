@@ -344,3 +344,85 @@ body {
 .hidden {
   display: none !important;
 }
+
+/* 手动导入面板 */
+.import-panel {
+  margin-bottom: var(--spacing);
+  padding: var(--spacing);
+  background-color: var(--card-bg);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.import-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--spacing);
+}
+
+.import-panel-header h2 {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.import-window-list {
+  max-height: 240px;
+  overflow-y: auto;
+  margin-bottom: var(--spacing);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+}
+
+.import-window-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px;
+  border-bottom: 1px solid #f1f3f4;
+  cursor: pointer;
+}
+
+.import-window-item:last-child {
+  border-bottom: none;
+}
+
+.import-window-item:hover {
+  background-color: #f8f9fa;
+}
+
+.import-window-item input[type="checkbox"] {
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+
+.import-window-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.import-window-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.import-window-tabs {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+/* 工作区卡片内的同步按钮 */
+.workspace-actions .btn-sync {
+  background-color: #e8f5e9;
+  color: var(--success-color);
+  margin-right: 4px;
+}
+
+.workspace-actions .btn-sync:hover {
+  background-color: #c8e6c9;
+}

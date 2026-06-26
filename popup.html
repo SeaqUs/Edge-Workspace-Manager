@@ -23,6 +23,22 @@
       </div>
     </section>
 
+    <!-- 手动导入管理面板 -->
+    <section id="import-panel" class="import-panel hidden">
+      <div class="import-panel-header">
+        <h2>选择要导入的窗口</h2>
+        <button id="btn-close-import" class="btn btn-small btn-secondary" type="button">关闭</button>
+      </div>
+      <div id="import-window-list" class="import-window-list">
+        <!-- 动态渲染可选窗口 -->
+      </div>
+      <div class="button-row">
+        <button id="btn-select-all" class="btn btn-small btn-secondary" type="button">全选</button>
+        <button id="btn-deselect-all" class="btn btn-small btn-secondary" type="button">全不选</button>
+        <button id="btn-confirm-import" class="btn btn-primary" type="button">导入选中</button>
+      </div>
+    </section>
+
     <!-- 工作区列表 -->
     <main id="workspace-list" class="workspace-list">
       <!-- 动态渲染工作区卡片 -->

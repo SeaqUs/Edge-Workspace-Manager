@@ -16,8 +16,18 @@
   const btnCancelCreateEl = document.getElementById('btn-cancel-create');
   const errorMessageEl = document.getElementById('error-message');
 
+  // 手动导入面板相关元素
+  const importPanelEl = document.getElementById('import-panel');
+  const importWindowListEl = document.getElementById('import-window-list');
+  const btnCloseImportEl = document.getElementById('btn-close-import');
+  const btnSelectAllEl = document.getElementById('btn-select-all');
+  const btnDeselectAllEl = document.getElementById('btn-deselect-all');
+  const btnConfirmImportEl = document.getElementById('btn-confirm-import');
+
   // 当前数据缓存
   let workspaceData = { workspaces: [] };
+  // 当前可导入窗口缓存
+  let importableWindows = [];
 
   /**
    * 页面加载完成后初始化
@@ -47,6 +57,12 @@
         confirmCreateWorkspace();
       }
     });
+
+    // 手动导入面板事件
+    btnCloseImportEl.addEventListener('click', hideImportPanel);
+    btnSelectAllEl.addEventListener('click', () => setAllImportCheckboxes(true));
+    btnDeselectAllEl.addEventListener('click', () => setAllImportCheckboxes(false));
+    btnConfirmImportEl.addEventListener('click', confirmImportSelected);
   }
 
   /**
@@ -64,6 +80,130 @@
   function hideCreatePanel() {
     createPanelEl.classList.add('hidden');
     inputWorkspaceNameEl.value = '';
+  }
+
+  /**
+   * 显示手动导入面板并加载可导入窗口
+   */
+  async function showImportPanel() {
+    createPanelEl.classList.add('hidden');
+    importPanelEl.classList.remove('hidden');
+    await loadAndRenderImportableWindows();
+  }
+
+  /**
+   * 隐藏手动导入面板
+   */
+  function hideImportPanel() {
+    importPanelEl.classList.add('hidden');
+    importWindowListEl.innerHTML = '';
+    importableWindows = [];
+  }
+
+  /**
+   * 从后台加载所有可导入的浏览器窗口并渲染
+   */
+  async function loadAndRenderImportableWindows() {
+    try {
+      const response = await sendMessage({ type: 'GET_OPEN_WINDOWS' });
+      if (response && response.success) {
+        importableWindows = response.windows || [];
+        renderImportableWindows();
+      } else {
+        showError(response && response.error ? response.error : '加载窗口列表失败');
+      }
+    } catch (error) {
+      showError(`加载窗口列表失败: ${error.message}`);
+    }
+  }
+
+  /**
+   * 渲染可导入窗口列表
+   */
+  function renderImportableWindows() {
+    importWindowListEl.innerHTML = '';
+
+    if (importableWindows.length === 0) {
+      const emptyItem = document.createElement('div');
+      emptyItem.className = 'import-window-item';
+      emptyItem.textContent = '未发现可导入的普通窗口';
+      importWindowListEl.appendChild(emptyItem);
+      return;
+    }
+
+    importableWindows.forEach((win) => {
+      const item = document.createElement('label');
+      item.className = 'import-window-item';
+      item.htmlFor = `import-win-${win.id}`;
+
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.id = `import-win-${win.id}`;
+      checkbox.value = win.id;
+      checkbox.dataset.windowId = win.id;
+
+      const info = document.createElement('div');
+      info.className = 'import-window-info';
+
+      const title = document.createElement('div');
+      title.className = 'import-window-title';
+      title.textContent = win.title || `窗口 ${win.id}`;
+
+      const tabs = document.createElement('div');
+      tabs.className = 'import-window-tabs';
+      tabs.textContent = `${win.tabCount} 个标签页`;
+
+      info.appendChild(title);
+      info.appendChild(tabs);
+      item.appendChild(checkbox);
+      item.appendChild(info);
+
+      // 点击整行切换复选框
+      item.addEventListener('click', (event) => {
+        if (event.target !== checkbox) {
+          checkbox.checked = !checkbox.checked;
+        }
+      });
+
+      importWindowListEl.appendChild(item);
+    });
+  }
+
+  /**
+   * 设置所有导入复选框状态
+   * @param {boolean} checked - 是否选中
+   */
+  function setAllImportCheckboxes(checked) {
+    const checkboxes = importWindowListEl.querySelectorAll('input[type="checkbox"]');
+    checkboxes.forEach(cb => { cb.checked = checked; });
+  }
+
+  /**
+   * 确认导入选中的窗口
+   */
+  async function confirmImportSelected() {
+    const checkboxes = importWindowListEl.querySelectorAll('input[type="checkbox"]:checked');
+    const windowIds = Array.from(checkboxes).map(cb => parseInt(cb.dataset.windowId, 10));
+
+    if (windowIds.length === 0) {
+      showError('请至少选择一个窗口');
+      return;
+    }
+
+    try {
+      const response = await sendMessage({
+        type: 'IMPORT_SELECTED_WINDOWS',
+        windowIds
+      });
+      if (response && response.success) {
+        hideImportPanel();
+        await loadAndRender();
+      } else {
+        showError(response && response.error ? response.error : '导入失败');
+      }
+    } catch (error) {
+      showError(`导入失败: ${error.message}`);
+    }
   }
 
   /**
@@ -162,6 +302,18 @@
     deleteBtn.addEventListener('click', () => deleteWorkspace(ws.id));
 
     actionsEl.appendChild(openBtn);
+
+    // 仅当窗口已打开时显示同步按钮
+    if (ws.windowId) {
+      const syncBtn = document.createElement('button');
+      syncBtn.className = 'btn btn-small btn-sync';
+      syncBtn.type = 'button';
+      syncBtn.textContent = '同步';
+      syncBtn.title = '将工作区与当前窗口标签页强制同步';
+      syncBtn.addEventListener('click', () => syncWorkspace(ws.id));
+      actionsEl.appendChild(syncBtn);
+    }
+
     actionsEl.appendChild(deleteBtn);
     header.appendChild(nameEl);
     header.appendChild(actionsEl);
@@ -538,6 +690,23 @@
   }
 
   /**
+   * 同步工作区与对应 Edge 窗口的标签页
+   * @param {string} workspaceId - 工作区 ID
+   */
+  async function syncWorkspace(workspaceId) {
+    try {
+      const response = await sendMessage({ type: 'SYNC_WORKSPACE', workspaceId });
+      if (response && response.success) {
+        await loadAndRender();
+      } else {
+        showError(response && response.error ? response.error : '同步失败，请确认工作区窗口已打开');
+      }
+    } catch (error) {
+      showError(`同步失败: ${error.message}`);
+    }
+  }
+
+  /**
    * 向后台 Service Worker 发送消息
    * @param {object} message - 消息对象
    * @returns {Promise<object>} 响应对象
@@ -580,27 +749,19 @@
   }
 
   /**
-   * 在头部追加导入按钮组
+   * 在头部追加导入管理按钮
    * 因 popup.js 在 DOM 构建后引入，此处直接操作 header
    */
   const appHeader = document.querySelector('.app-header');
   if (appHeader) {
-    const importCurrentBtn = document.createElement('button');
-    importCurrentBtn.className = 'btn btn-secondary';
-    importCurrentBtn.type = 'button';
-    importCurrentBtn.textContent = '导入当前窗口';
-    importCurrentBtn.style.marginLeft = '8px';
-    importCurrentBtn.addEventListener('click', importCurrentWindow);
+    const importManageBtn = document.createElement('button');
+    importManageBtn.className = 'btn btn-secondary';
+    importManageBtn.type = 'button';
+    importManageBtn.textContent = '导入管理';
+    importManageBtn.title = '手动选择 Edge 窗口导入为扩展工作区';
+    importManageBtn.style.marginLeft = '8px';
+    importManageBtn.addEventListener('click', showImportPanel);
 
-    const importAllBtn = document.createElement('button');
-    importAllBtn.className = 'btn btn-secondary';
-    importAllBtn.type = 'button';
-    importAllBtn.textContent = '导入所有窗口';
-    importAllBtn.title = '将所有打开的 Edge 窗口导入为扩展工作区';
-    importAllBtn.style.marginLeft = '8px';
-    importAllBtn.addEventListener('click', importAllWindows);
-
-    appHeader.appendChild(importCurrentBtn);
-    appHeader.appendChild(importAllBtn);
+    appHeader.appendChild(importManageBtn);
   }
 })();

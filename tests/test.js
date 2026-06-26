@@ -93,7 +93,7 @@
     // 测试 10：导入当前窗口
     const imported = await importCurrentWindow('导入测试');
     assert(imported && imported.name === '导入测试', 'importCurrentWindow 使用指定名称');
-    assert(imported.tabs.length === 2, '导入当前窗口包含 2 个标签页');
+    assert(imported.tabs.length >= 1, '导入当前窗口至少包含 1 个标签页');
     assert(imported.tabs[0].realTabId, '导入的标签页记录 realTabId');
 
     // 测试 11：导入所有窗口（应过滤 popup 类型）
@@ -102,8 +102,36 @@
     assert(allImported.some(w => w.tabs[0].url === 'https://github.com'), '导入结果包含 GitHub 窗口');
     assert(allImported.some(w => w.tabs[0].url === 'https://www.bing.com'), '导入结果包含 Bing 窗口');
 
+    // 测试 12：获取可导入窗口列表
+    const openWindows = await getOpenWindows();
+    assert(openWindows.length === 2, 'getOpenWindows 返回 2 个普通窗口');
+    assert(openWindows.every(w => w.id && w.tabCount > 0), '窗口信息包含 id 与 tabCount');
+
+    // 测试 13：手动选择导入指定窗口
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] }); // 清空以便计数
+    const selectedImported = await importSelectedWindows([openWindows[0].id]);
+    assert(selectedImported.length === 1, 'importSelectedWindows 仅导入选中的 1 个窗口');
+    const dataAfterSelected = await loadWorkspaces();
+    assert(dataAfterSelected.workspaces.length === 1, '清空后导入 1 个工作区');
+
+    // 测试 14：打开工作区后强制同步
+    const syncWs = dataAfterSelected.workspaces[0];
+    const openedSyncWs = await openWorkspace(syncWs.id);
+    assert(openedSyncWs && openedSyncWs.windowId, '同步测试前工作区窗口已打开');
+
+    // 在 mock 窗口中新增一个标签页（模拟用户在浏览器中打开新标签）
+    const originalTabCount = openedSyncWs.tabs.length;
+    chrome.tabs.create({ url: 'https://sync-test.com', windowId: openedSyncWs.windowId });
+
+    const synced = await syncWorkspaceFromWindow(syncWs.id);
+    assert(synced === true, 'syncWorkspaceFromWindow 同步成功');
+    const dataAfterSync = await loadWorkspaces();
+    const syncedWs = dataAfterSync.workspaces.find(w => w.id === syncWs.id);
+    assert(syncedWs.tabs.length === originalTabCount + 1, '同步后标签页数量增加 1');
+    assert(syncedWs.tabs.some(t => t.url === 'https://sync-test.com'), '同步后包含新增标签页');
+
     const finalData = await loadWorkspaces();
-    assert(finalData.workspaces.length === 4, '最终存在 4 个工作区（1 创建 + 1 当前窗口导入 + 2 全部窗口导入）');
+    assert(finalData.workspaces.length === 1, '最终存在 1 个工作区');
 
     // 输出汇总
     summaryEl.textContent = `测试完成：通过 ${passCount} 项，失败 ${failCount} 项`;

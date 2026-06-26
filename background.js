@@ -113,6 +113,45 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 });
 
 /**
+ * 监听标签页创建事件：在工作区窗口中新增标签页时同步到影子数据库
+ */
+chrome.tabs.onCreated.addListener(async (tab) => {
+  if (!tab.windowId) return;
+
+  try {
+    const data = await loadWorkspaces();
+    const ws = data.workspaces.find(w => w.windowId === tab.windowId);
+    if (!ws) return;
+
+    let hostname = '';
+    try {
+      if (tab.url) {
+        hostname = new URL(tab.url).hostname;
+      }
+    } catch (error) {
+      // 忽略无效 URL
+    }
+
+    ws.tabs.push({
+      id: generateId('tab'),
+      url: tab.url || 'edge://newtab/',
+      title: tab.title || tab.url || '新标签页',
+      favIconUrl: tab.favIconUrl || (hostname ? `https://www.google.com/s2/favicons?domain=${hostname}` : null),
+      groupId: null,
+      pinned: tab.pinned || false,
+      realTabId: tab.id,
+      createdAt: nowIso()
+    });
+    ws.updatedAt = nowIso();
+
+    await saveWorkspaces(data);
+    console.log(`[Edge Workspace Manager] 标签页 ${tab.id} 已创建，同步更新影子数据库`);
+  } catch (error) {
+    console.error('[Edge Workspace Manager] 处理标签页创建事件失败:', error);
+  }
+});
+
+/**
  * 监听存储变化，向所有 popup 页面广播刷新消息
  */
 chrome.storage.onChanged.addListener((changes, namespace) => {
@@ -220,6 +259,24 @@ async function handleMessage(request, sender, sendResponse) {
       case 'IMPORT_ALL_WINDOWS': {
         const imported = await importAllWindows();
         sendResponse({ success: imported.length > 0, workspaces: imported, count: imported.length });
+        break;
+      }
+
+      case 'GET_OPEN_WINDOWS': {
+        const windows = await getOpenWindows();
+        sendResponse({ success: true, windows });
+        break;
+      }
+
+      case 'IMPORT_SELECTED_WINDOWS': {
+        const imported = await importSelectedWindows(request.windowIds);
+        sendResponse({ success: imported.length > 0, workspaces: imported, count: imported.length });
+        break;
+      }
+
+      case 'SYNC_WORKSPACE': {
+        const ok = await syncWorkspaceFromWindow(request.workspaceId);
+        sendResponse({ success: ok });
         break;
       }
 

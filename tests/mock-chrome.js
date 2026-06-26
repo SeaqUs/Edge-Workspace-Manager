@@ -13,6 +13,75 @@
   let nextWindowId = 1000;
   let nextTabId = 1;
   const windows = new Map();
+  let initialWindowsCreated = false;
+
+  /**
+   * 创建初始模拟窗口，仅执行一次
+   * 包含两个 normal 窗口和一个 popup 窗口
+   */
+  function ensureInitialWindows() {
+    if (initialWindowsCreated) return;
+    initialWindowsCreated = true;
+
+    const windowAId = nextWindowId++;
+    const windowBId = nextWindowId++;
+    const popupWindowId = nextWindowId++;
+
+    const windowA = {
+      id: windowAId,
+      tabs: [
+        {
+          id: nextTabId++,
+          url: 'https://github.com',
+          title: 'GitHub',
+          windowId: windowAId,
+          index: 0,
+          pinned: false,
+          favIconUrl: 'https://github.com/favicon.ico'
+        }
+      ],
+      focused: true,
+      type: 'normal'
+    };
+
+    const windowB = {
+      id: windowBId,
+      tabs: [
+        {
+          id: nextTabId++,
+          url: 'https://www.bing.com',
+          title: 'Bing',
+          windowId: windowBId,
+          index: 0,
+          pinned: false,
+          favIconUrl: null
+        }
+      ],
+      focused: false,
+      type: 'normal'
+    };
+
+    const popupWindow = {
+      id: popupWindowId,
+      tabs: [
+        {
+          id: nextTabId++,
+          url: 'https://popup.example.com',
+          title: 'Popup',
+          windowId: popupWindowId,
+          index: 0,
+          pinned: false,
+          favIconUrl: null
+        }
+      ],
+      focused: false,
+      type: 'popup'
+    };
+
+    windows.set(windowAId, windowA);
+    windows.set(windowBId, windowB);
+    windows.set(popupWindowId, popupWindow);
+  }
 
   window.chrome = {
     storage: {
@@ -67,101 +136,24 @@
         return Promise.resolve(win);
       },
 
+      get(windowId, options) {
+        const win = windows.get(windowId);
+        // 深拷贝 tabs 避免外部修改影响 mock 内部状态
+        const cloned = win ? JSON.parse(JSON.stringify(win)) : null;
+        return Promise.resolve(cloned);
+      },
+
       getLastFocused(options) {
-        // 返回一个模拟的当前窗口，包含两个标签页
-        const windowId = nextWindowId++;
-        const tabs = [
-          {
-            id: nextTabId++,
-            url: 'https://github.com',
-            title: 'GitHub',
-            windowId: windowId,
-            index: 0,
-            pinned: false,
-            favIconUrl: 'https://github.com/favicon.ico'
-          },
-          {
-            id: nextTabId++,
-            url: 'https://example.com',
-            title: 'Example Domain',
-            windowId: windowId,
-            index: 1,
-            pinned: false,
-            favIconUrl: null
-          }
-        ];
-        const win = {
-          id: windowId,
-          tabs: tabs,
-          focused: true,
-          type: 'normal'
-        };
-        windows.set(windowId, win);
-        return Promise.resolve(win);
+        ensureInitialWindows();
+        // 返回第一个普通窗口作为当前焦点窗口
+        const firstNormal = Array.from(windows.values()).find(w => w.type === 'normal');
+        return Promise.resolve(firstNormal ? JSON.parse(JSON.stringify(firstNormal)) : null);
       },
 
       getAll(options) {
-        // 返回两个模拟普通窗口：一个 GitHub 窗口，一个 Bing 窗口
-        const windowAId = nextWindowId++;
-        const windowBId = nextWindowId++;
-        const popupWindowId = nextWindowId++;
-
-        const windowA = {
-          id: windowAId,
-          tabs: [
-            {
-              id: nextTabId++,
-              url: 'https://github.com',
-              title: 'GitHub',
-              windowId: windowAId,
-              index: 0,
-              pinned: false,
-              favIconUrl: 'https://github.com/favicon.ico'
-            }
-          ],
-          focused: true,
-          type: 'normal'
-        };
-
-        const windowB = {
-          id: windowBId,
-          tabs: [
-            {
-              id: nextTabId++,
-              url: 'https://www.bing.com',
-              title: 'Bing',
-              windowId: windowBId,
-              index: 0,
-              pinned: false,
-              favIconUrl: null
-            }
-          ],
-          focused: false,
-          type: 'normal'
-        };
-
-        const popupWindow = {
-          id: popupWindowId,
-          tabs: [
-            {
-              id: nextTabId++,
-              url: 'https://popup.example.com',
-              title: 'Popup',
-              windowId: popupWindowId,
-              index: 0,
-              pinned: false,
-              favIconUrl: null
-            }
-          ],
-          focused: false,
-          type: 'popup'
-        };
-
-        windows.set(windowAId, windowA);
-        windows.set(windowBId, windowB);
-        windows.set(popupWindowId, popupWindow);
-
-        return Promise.resolve([windowA, windowB, popupWindow]);
+        ensureInitialWindows();
+        const allWindows = Array.from(windows.values());
+        return Promise.resolve(JSON.parse(JSON.stringify(allWindows)));
       }
     },
 

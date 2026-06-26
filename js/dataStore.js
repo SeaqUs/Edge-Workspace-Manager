@@ -467,6 +467,136 @@ async function importAllWindows() {
 }
 
 /**
+ * 获取当前所有可导入的浏览器窗口列表
+ * 用于手动选择导入，返回简化的窗口信息供 UI 展示
+ * @returns {Promise<object[]>} 窗口信息数组，每项包含 id、title、tabCount、tabs 摘要
+ */
+async function getOpenWindows() {
+  try {
+    const allWindows = await chrome.windows.getAll({ populate: true });
+    return allWindows
+      .filter(w => w.type === 'normal' && w.tabs && w.tabs.length > 0)
+      .map(w => ({
+        id: w.id,
+        title: w.title || `窗口 ${w.id}`,
+        tabCount: w.tabs.length,
+        tabs: w.tabs.map(t => ({
+          url: t.url,
+          title: t.title || t.url || '新标签页',
+          favIconUrl: t.favIconUrl
+        }))
+      }));
+  } catch (error) {
+    console.error('[Edge Workspace Manager] 获取打开窗口失败:', error);
+    return [];
+  }
+}
+
+/**
+ * 根据用户选择的窗口 ID 列表导入为工作区
+ * @param {number[]} windowIds - 要导入的窗口 ID 数组
+ * @returns {Promise<object[]>} 新建的工作区对象数组
+ */
+async function importSelectedWindows(windowIds) {
+  if (!windowIds || windowIds.length === 0) return [];
+
+  try {
+    const allWindows = await chrome.windows.getAll({ populate: true });
+    const selectedWindows = allWindows.filter(w => windowIds.includes(w.id));
+
+    if (selectedWindows.length === 0) {
+      console.warn('[Edge Workspace Manager] 未找到选中的窗口');
+      return [];
+    }
+
+    const data = await loadWorkspaces();
+    const importedWorkspaces = [];
+
+    selectedWindows.forEach((chromeWindow, index) => {
+      const newWorkspace = convertChromeWindowToWorkspace(
+        chromeWindow,
+        `导入工作区 ${data.workspaces.length + importedWorkspaces.length + 1}`
+      );
+      if (newWorkspace) {
+        data.workspaces.push(newWorkspace);
+        importedWorkspaces.push(newWorkspace);
+      }
+    });
+
+    await saveWorkspaces(data);
+    return importedWorkspaces;
+  } catch (error) {
+    console.error('[Edge Workspace Manager] 导入选中窗口失败:', error);
+    return [];
+  }
+}
+
+/**
+ * 将工作区的影子数据与对应 Edge 窗口的实际标签页强制同步
+ * 适用于自动同步遗漏、手动调整后回写等场景
+ * @param {string} workspaceId - 工作区 ID
+ * @returns {Promise<boolean>} 是否同步成功
+ */
+async function syncWorkspaceFromWindow(workspaceId) {
+  const data = await loadWorkspaces();
+  const ws = data.workspaces.find(w => w.id === workspaceId);
+  if (!ws || !ws.windowId) {
+    console.warn('[Edge Workspace Manager] 工作区未关联窗口，无法同步');
+    return false;
+  }
+
+  try {
+    const chromeWindow = await chrome.windows.get(ws.windowId, { populate: true });
+    if (!chromeWindow || !chromeWindow.tabs) {
+      // 窗口已不存在，解除关联
+      ws.windowId = null;
+      ws.tabs.forEach(tab => delete tab.realTabId);
+      ws.updatedAt = nowIso();
+      await saveWorkspaces(data);
+      return false;
+    }
+
+    // 保留原有分组分配与内部 ID 映射
+    const existingTabsByRealId = new Map();
+    ws.tabs.forEach(tab => {
+      if (tab.realTabId) {
+        existingTabsByRealId.set(tab.realTabId, tab);
+      }
+    });
+
+    ws.tabs = chromeWindow.tabs.map((chromeTab) => {
+      const existing = existingTabsByRealId.get(chromeTab.id);
+      let hostname = '';
+      try {
+        if (chromeTab.url) {
+          hostname = new URL(chromeTab.url).hostname;
+        }
+      } catch (error) {
+        // 忽略无效 URL
+      }
+
+      return {
+        id: existing ? existing.id : generateId('tab'),
+        url: chromeTab.url || 'edge://newtab/',
+        title: chromeTab.title || chromeTab.url || '新标签页',
+        favIconUrl: chromeTab.favIconUrl || (hostname ? `https://www.google.com/s2/favicons?domain=${hostname}` : null),
+        groupId: existing ? existing.groupId : null,
+        pinned: chromeTab.pinned || false,
+        realTabId: chromeTab.id,
+        createdAt: existing ? existing.createdAt : nowIso()
+      };
+    });
+
+    ws.updatedAt = nowIso();
+    await saveWorkspaces(data);
+    return true;
+  } catch (error) {
+    console.error('[Edge Workspace Manager] 同步工作区失败:', error);
+    return false;
+  }
+}
+
+/**
  * 关闭工作区对应的浏览器窗口
  * @param {string} workspaceId - 工作区 ID
  * @returns {Promise<boolean>} 是否关闭成功
@@ -518,6 +648,9 @@ if (typeof module !== 'undefined' && module.exports) {
     closeWorkspace,
     importCurrentWindow,
     importAllWindows,
+    getOpenWindows,
+    importSelectedWindows,
+    syncWorkspaceFromWindow,
     generateId,
     nowIso
   };
