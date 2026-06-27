@@ -21,6 +21,7 @@
     } else {
       failCount++;
       log(`FAIL: ${message}`, 'fail');
+      console.log('[TEST_FAIL]', message);
     }
   }
 
@@ -279,6 +280,65 @@
     assert(applyWsAfter.windowId !== null, '工作区已关联窗口');
     assert(applyWsAfter.tabs.some(t => t.realTabId), '标签页已同步到窗口');
 
+    // 测试 25：两个工作区都关闭时移动标签页，打开窗口后自动同步
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    await clearPendingOperations();
+    const closedSourceWs = await createWorkspace('关闭源工作区');
+    const closedTargetWs = await createWorkspace('关闭目标工作区');
+    await addTabToWorkspace(closedSourceWs.id, 'https://note.ms/test', 'Note.ms');
+    // 目标工作区保留一个原有标签页，使扫描时能通过 URL 匹配到用户打开的目标窗口
+    await addTabToWorkspace(closedTargetWs.id, 'https://other.example.com', 'Other');
+
+    // 重新加载工作区数据以获取 addTabToWorkspace 后的真实状态
+    // 因为 chrome.storage.local 的序列化/反序列化会生成新的对象引用
+    const dataBeforeMove = await loadWorkspaces();
+    const sourceWsFresh = dataBeforeMove.workspaces.find(w => w.id === closedSourceWs.id);
+    const targetWsFresh = dataBeforeMove.workspaces.find(w => w.id === closedTargetWs.id);
+    const movedClosedTab = sourceWsFresh.tabs[0];
+
+    // 模拟两个工作区均已关闭，无 windowId 与真实标签页映射
+    sourceWsFresh.windowId = null;
+    delete movedClosedTab.realTabId;
+    targetWsFresh.windowId = null;
+    targetWsFresh.tabs.forEach(tab => delete tab.realTabId);
+    await saveWorkspaces({ version: '1.0.0', workspaces: [sourceWsFresh, targetWsFresh] });
+
+    const movedClosed = await moveTabToWorkspace(movedClosedTab.id, sourceWsFresh.id, targetWsFresh.id);
+    assert(movedClosed === true, '关闭状态下 moveTabToWorkspace 返回成功');
+
+    // 验证源/目标工作区均产生待执行操作
+    const sourcePending = await getPendingOperations(closedSourceWs.id);
+    const targetPending = await getPendingOperations(closedTargetWs.id);
+    assert(sourcePending.length === 1 && sourcePending[0].type === 'SYNC', '源工作区已入队 SYNC 操作');
+    assert(targetPending.length === 1 && targetPending[0].type === 'OPEN', '目标工作区已入队 OPEN 操作');
+
+    // 模拟用户通过 Edge 原生按钮打开源窗口（仍包含已移出的 notems）和目标窗口（不包含 notems）
+    const sourceWindow = await chrome.windows.create({ url: ['https://note.ms/test'], focused: false });
+    const targetWindow = await chrome.windows.create({ url: ['https://other.example.com'], focused: false });
+
+    // 扫描关联并自动应用待执行操作
+    const scanClosedResult = await scanOpenWindowsAndAssociate();
+    console.log('[TEST_DEBUG] scan associated', scanClosedResult.associated, 'unmatched', scanClosedResult.unmatchedWindows.map(w => ({ id: w.id, tabs: w.tabs.map(t => t.url) })));
+    const dataAfterScanClosed = await loadWorkspaces();
+    console.log('[TEST_DEBUG] workspaces after scan', JSON.stringify(dataAfterScanClosed.workspaces.map(w => ({ id: w.id, windowId: w.windowId, tabs: w.tabs.map(t => ({ id: t.id, url: t.url, realTabId: t.realTabId })), pendingCleanup: w.pendingCleanup }))));
+    assert(scanClosedResult.associated >= 2, '扫描至少关联 2 个工作区');
+
+    // 验证源窗口中已移出的标签页被关闭
+    const sourceWindowAfter = await chrome.windows.get(sourceWindow.id, { populate: true });
+    console.log('[TEST_DEBUG] sourceWindowAfter', sourceWindowAfter.id, sourceWindowAfter.tabs.map(t => t.url));
+    assert(sourceWindowAfter.tabs.every(t => normalizeUrl(t.url) !== normalizeUrl('https://note.ms/test')), '源窗口中已移出的标签页已关闭');
+
+    // 验证目标窗口中已创建移入的标签页
+    const targetWindowAfter = await chrome.windows.get(targetWindow.id, { populate: true });
+    console.log('[TEST_DEBUG] targetWindowAfter', targetWindowAfter.id, targetWindowAfter.tabs.map(t => t.url));
+    assert(targetWindowAfter.tabs.some(t => normalizeUrl(t.url) === normalizeUrl('https://note.ms/test')), '目标窗口中已创建移入的标签页');
+
+    // 验证同步完成后源工作区的 pendingCleanup 已清除
+    const dataAfterClosedMove = await loadWorkspaces();
+    const sourceAfterClosedMove = dataAfterClosedMove.workspaces.find(w => w.id === closedSourceWs.id);
+    console.log('[TEST_DEBUG] sourceAfterClosedMove pendingCleanup', JSON.stringify(sourceAfterClosedMove.pendingCleanup));
+    assert(!sourceAfterClosedMove.pendingCleanup, '同步后源工作区 pendingCleanup 已清除');
+
     // 输出汇总
     summaryEl.textContent = `测试完成：通过 ${passCount} 项，失败 ${failCount} 项`;
     summaryEl.className = failCount === 0 ? 'pass' : 'fail';
@@ -290,6 +350,7 @@
       total: passCount + failCount,
       success: failCount === 0
     };
+    console.log('[TEST_RESULT]', JSON.stringify(window.__testResults));
   }
 
   // 页面加载后执行测试
@@ -298,5 +359,6 @@
     summaryEl.textContent = '测试执行异常';
     summaryEl.className = 'fail';
     window.__testResults = { pass: passCount, fail: failCount + 1, total: passCount + failCount + 1, success: false, error: error.message };
+    console.log('[TEST_RESULT]', JSON.stringify(window.__testResults));
   });
 })();

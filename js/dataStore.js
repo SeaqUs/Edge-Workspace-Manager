@@ -74,10 +74,16 @@ function normalizeUrl(url) {
  */
 function calculateWindowMatchScore(chromeWindow, ws) {
   if (!chromeWindow || !chromeWindow.tabs || chromeWindow.tabs.length === 0) return 0;
-  if (!ws || !ws.tabs || ws.tabs.length === 0) return 0;
+  if (!ws) return 0;
 
   const windowUrls = chromeWindow.tabs.map(t => normalizeUrl(t.url)).filter(Boolean);
-  const wsUrls = ws.tabs.map(t => normalizeUrl(t.url)).filter(Boolean);
+  let wsUrls = (ws.tabs || []).map(t => normalizeUrl(t.url)).filter(Boolean);
+
+  // 若工作区有待清理 URL，也纳入匹配评分，帮助识别移出标签页后的原窗口
+  if (ws.pendingCleanup && ws.pendingCleanup.urls && ws.pendingCleanup.urls.length > 0) {
+    const cleanupUrls = ws.pendingCleanup.urls.map(u => normalizeUrl(u)).filter(Boolean);
+    wsUrls = wsUrls.concat(cleanupUrls);
+  }
 
   if (windowUrls.length === 0 || wsUrls.length === 0) return 0;
 
@@ -135,7 +141,12 @@ async function tryAssociateWindowWithWorkspace(chromeWindow) {
     }
   }
 
-  if (bestMatch && bestScore >= WINDOW_MATCH_THRESHOLD) {
+  // 若窗口包含该工作区待清理的 URL，说明这是标签页移出前的原窗口，允许关联。
+  // 仅当匹配度达到阈值或存在待清理 URL 线索时才建立关联，避免把无关窗口误识别为工作区。
+  const hasCleanupMatch = bestMatch && windowContainsPendingCleanupUrls(chromeWindow, bestMatch);
+  const effectiveThreshold = hasCleanupMatch ? 0 : WINDOW_MATCH_THRESHOLD;
+
+  if (bestMatch && (bestScore > effectiveThreshold || hasCleanupMatch)) {
     associateWindowWithWorkspaceInternal(chromeWindow, bestMatch);
     bestMatch.updatedAt = nowIso();
     await saveWorkspaces(data);
@@ -146,6 +157,24 @@ async function tryAssociateWindowWithWorkspace(chromeWindow) {
   }
 
   return false;
+}
+
+/**
+ * 判断浏览器窗口是否包含工作区待清理的 URL
+ * 用于标签页移出后，帮助识别原工作区对应的窗口
+ * @param {object} chromeWindow - 包含 tabs 的窗口对象
+ * @param {object} ws - 工作区对象
+ * @returns {boolean}
+ */
+function windowContainsPendingCleanupUrls(chromeWindow, ws) {
+  if (!ws || !ws.pendingCleanup || !ws.pendingCleanup.urls || ws.pendingCleanup.urls.length === 0) {
+    return false;
+  }
+  if (!chromeWindow || !chromeWindow.tabs || chromeWindow.tabs.length === 0) return false;
+
+  const windowUrls = chromeWindow.tabs.map(t => normalizeUrl(t.url)).filter(Boolean);
+  const cleanupUrls = ws.pendingCleanup.urls.map(u => normalizeUrl(u)).filter(Boolean);
+  return cleanupUrls.some(url => windowUrls.includes(url));
 }
 
 /**
@@ -182,6 +211,37 @@ async function scanOpenWindowsAndAssociate() {
       }
 
       if (bestMatch && bestScore >= WINDOW_MATCH_THRESHOLD) {
+        associateWindowWithWorkspaceInternal(bestMatch, ws);
+        ws.updatedAt = nowIso();
+        matchedWindowIds.add(bestMatch.id);
+        associatedCount++;
+      }
+    }
+
+    // 第二轮 fallback：对于仍有待执行操作且未关联的工作区，
+    // 允许与剩余未匹配窗口关联，确保延迟操作有机会执行。
+    // 为防止把无关窗口误识别为目标工作区，仅当匹配度大于 0，
+    // 或窗口包含该工作区待清理 URL 时，才建立关联。
+    for (const ws of unassociatedWorkspaces) {
+      if (ws.windowId || matchedWindowIds.has(ws.windowId)) continue;
+      if (!(await hasPendingOperations(ws.id))) continue;
+
+      let bestMatch = null;
+      let bestScore = 0;
+
+      for (const chromeWindow of normalWindows) {
+        if (matchedWindowIds.has(chromeWindow.id)) continue;
+
+        const score = calculateWindowMatchScore(chromeWindow, ws);
+        if (score > bestScore) {
+          bestScore = score;
+          bestMatch = chromeWindow;
+        }
+      }
+
+      // 没有 URL 线索时不强行关联，避免误连到不相关的窗口
+      const hasCleanupMatch = bestMatch && windowContainsPendingCleanupUrls(bestMatch, ws);
+      if (bestMatch && (bestScore > 0 || hasCleanupMatch)) {
         associateWindowWithWorkspaceInternal(bestMatch, ws);
         ws.updatedAt = nowIso();
         matchedWindowIds.add(bestMatch.id);
@@ -512,15 +572,47 @@ async function moveTabToWorkspace(tabId, sourceWorkspaceId, targetWorkspaceId) {
   sourceWs.updatedAt = nowIso();
   targetWs.updatedAt = nowIso();
 
-  // 若两个窗口均打开，尝试实际移动浏览器标签页
-  if (sourceWs.windowId && targetWs.windowId && movedTab.realTabId) {
+  // 同步真实浏览器标签页，避免“数据已移动但窗口里还在”
+  if (sourceWs.windowId && movedTab.realTabId) {
     try {
-      await chrome.tabs.move(movedTab.realTabId, {
-        windowId: targetWs.windowId,
-        index: -1
-      });
+      if (targetWs.windowId && targetWs.windowId !== sourceWs.windowId) {
+        // 目标窗口已打开：把真实标签页移动到目标窗口
+        await chrome.tabs.move(movedTab.realTabId, {
+          windowId: targetWs.windowId,
+          index: -1
+        });
+      } else {
+        // 目标窗口未打开：源窗口里的这个标签页已不属于源工作区，直接关闭
+        await chrome.tabs.remove(movedTab.realTabId);
+        delete movedTab.realTabId;
+      }
     } catch (error) {
-      console.error('[Edge Workspace Manager] 移动真实标签页失败:', error);
+      console.error('[Edge Workspace Manager] 同步真实标签页失败:', error);
+    }
+  }
+
+  // 目标窗口未打开时，清除可能过期的 realTabId，避免后续同步把旧窗口误关联回来
+  if (!targetWs.windowId) {
+    delete movedTab.realTabId;
+  }
+
+  // 若目标工作区当前没有窗口，自动将“打开并同步”意图入队，
+  // 这样等目标原生工作区窗口被检测到后，会自动把移入的标签页创建出来
+  if (!targetWs.windowId && targetWs.tabs.length > 0 && !(await hasPendingOperations(targetWorkspaceId))) {
+    await queuePendingOperation(targetWorkspaceId, 'OPEN', { reason: 'tabs_moved_in' });
+  }
+
+  // 若源工作区窗口当前未打开，记录待清理的 URL 并入队 SYNC 意图。
+  // 这样当源原生工作区窗口被重新打开后，扩展可以凭这些 URL 识别该窗口，
+  // 并自动关闭已移出的标签页。
+  if (!sourceWs.windowId) {
+    if (!sourceWs.pendingCleanup) {
+      sourceWs.pendingCleanup = { urls: [], createdAt: nowIso() };
+    }
+    sourceWs.pendingCleanup.urls.push(movedTab.url);
+    sourceWs.pendingCleanup.createdAt = nowIso();
+    if (!(await hasPendingOperations(sourceWorkspaceId))) {
+      await queuePendingOperation(sourceWorkspaceId, 'SYNC', { reason: 'tabs_moved_out' });
     }
   }
 
@@ -1045,6 +1137,12 @@ async function syncWorkspaceToWindow(workspaceId) {
 
     ws.tabs = updatedTabs;
     ws.updatedAt = nowIso();
+    // 同步完成后，待清理 URL 已无用，清除避免影响后续匹配
+    console.log('[Edge Workspace Manager] syncWorkspaceToWindow cleanup check', workspaceId, ws.pendingCleanup);
+    if (ws.pendingCleanup) {
+      delete ws.pendingCleanup;
+      console.log('[Edge Workspace Manager] syncWorkspaceToWindow pendingCleanup deleted', workspaceId);
+    }
     await saveWorkspaces(data);
     console.log(`[Edge Workspace Manager] 工作区 ${workspaceId} 的影子数据已同步到窗口 ${ws.windowId}`);
     return true;

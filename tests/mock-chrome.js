@@ -196,6 +196,15 @@
       },
 
       remove(tabId) {
+        for (const win of windows.values()) {
+          const index = win.tabs.findIndex(t => t.id === tabId);
+          if (index !== -1) {
+            win.tabs.splice(index, 1);
+            // 重新计算后续标签页的 index
+            win.tabs.forEach((t, i) => { t.index = i; });
+            break;
+          }
+        }
         return Promise.resolve();
       }
     }
