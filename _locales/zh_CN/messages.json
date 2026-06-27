@@ -1,0 +1,10 @@
+{
+  "extensionName": {
+    "message": "Edge Workspace Manager",
+    "description": "扩展名称"
+  },
+  "extensionDescription": {
+    "message": "基于本地影子数据库的 Edge 工作区与标签页管理扩展",
+    "description": "扩展描述"
+  }
+}
