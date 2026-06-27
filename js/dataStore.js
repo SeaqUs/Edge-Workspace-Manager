@@ -568,43 +568,15 @@ async function moveTabToWorkspace(tabId, sourceWorkspaceId, targetWorkspaceId) {
 
   const [movedTab] = sourceWs.tabs.splice(tabIndex, 1);
   movedTab.groupId = null; // 移动到新区后清除原分组关联
+  // 标签页已属于新工作区，旧的 realTabId 必须清除，
+  // 后续由 syncWorkspaceToWindow 根据目标窗口重新建立映射
+  delete movedTab.realTabId;
   targetWs.tabs.push(movedTab);
   sourceWs.updatedAt = nowIso();
   targetWs.updatedAt = nowIso();
 
-  // 同步真实浏览器标签页，避免“数据已移动但窗口里还在”
-  if (sourceWs.windowId && movedTab.realTabId) {
-    try {
-      if (targetWs.windowId && targetWs.windowId !== sourceWs.windowId) {
-        // 目标窗口已打开：把真实标签页移动到目标窗口
-        await chrome.tabs.move(movedTab.realTabId, {
-          windowId: targetWs.windowId,
-          index: -1
-        });
-      } else {
-        // 目标窗口未打开：源窗口里的这个标签页已不属于源工作区，直接关闭
-        await chrome.tabs.remove(movedTab.realTabId);
-        delete movedTab.realTabId;
-      }
-    } catch (error) {
-      console.error('[Edge Workspace Manager] 同步真实标签页失败:', error);
-    }
-  }
-
-  // 目标窗口未打开时，清除可能过期的 realTabId，避免后续同步把旧窗口误关联回来
-  if (!targetWs.windowId) {
-    delete movedTab.realTabId;
-  }
-
-  // 若目标工作区当前没有窗口，自动将“打开并同步”意图入队，
-  // 这样等目标原生工作区窗口被检测到后，会自动把移入的标签页创建出来
-  if (!targetWs.windowId && targetWs.tabs.length > 0 && !(await hasPendingOperations(targetWorkspaceId))) {
-    await queuePendingOperation(targetWorkspaceId, 'OPEN', { reason: 'tabs_moved_in' });
-  }
-
-  // 若源工作区窗口当前未打开，记录待清理的 URL 并入队 SYNC 意图。
-  // 这样当源原生工作区窗口被重新打开后，扩展可以凭这些 URL 识别该窗口，
-  // 并自动关闭已移出的标签页。
+  // 源窗口未打开时，记录待清理 URL 并入队 SYNC 意图，
+  // 等源窗口被检测到后自动关闭已移出的标签页。
   if (!sourceWs.windowId) {
     if (!sourceWs.pendingCleanup) {
       sourceWs.pendingCleanup = { urls: [], createdAt: nowIso() };
@@ -616,7 +588,33 @@ async function moveTabToWorkspace(tabId, sourceWorkspaceId, targetWorkspaceId) {
     }
   }
 
+  // 目标窗口未打开且有待同步内容时，入队 OPEN 意图，
+  // 等目标窗口被检测到后自动创建移入的标签页。
+  if (!targetWs.windowId && targetWs.tabs.length > 0 && !(await hasPendingOperations(targetWorkspaceId))) {
+    await queuePendingOperation(targetWorkspaceId, 'OPEN', { reason: 'tabs_moved_in' });
+  }
+
+  // 先保存影子数据库，确保后续 syncWorkspaceToWindow 读到的是已移动后的状态
   await saveWorkspaces(data);
+
+  // 若源/目标窗口已经打开，直接通过反向同步创建或关闭真实标签页。
+  // 这种方式统一使用“创建/关闭”而非 chrome.tabs.move，避免 tabs 事件干扰。
+  if (sourceWs.windowId) {
+    try {
+      await syncWorkspaceToWindow(sourceWorkspaceId);
+    } catch (error) {
+      console.error('[Edge Workspace Manager] 同步源工作区窗口失败:', error);
+    }
+  }
+
+  if (targetWs.windowId) {
+    try {
+      await syncWorkspaceToWindow(targetWorkspaceId);
+    } catch (error) {
+      console.error('[Edge Workspace Manager] 同步目标工作区窗口失败:', error);
+    }
+  }
+
   return true;
 }
 
