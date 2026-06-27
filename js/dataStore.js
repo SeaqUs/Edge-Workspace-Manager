@@ -70,6 +70,31 @@ function normalizeUrl(url) {
 }
 
 /**
+ * 获取工作区的待清理项目列表
+ * 兼容旧结构（urls 为字符串数组）与新结构（urls 为对象数组，含 url 与 targetWorkspaceId）
+ * @param {object} ws - 工作区对象
+ * @returns {Array<{url:string, targetWorkspaceId:string|null}>}
+ */
+function getPendingCleanupItems(ws) {
+  if (!ws || !ws.pendingCleanup || !Array.isArray(ws.pendingCleanup.urls)) return [];
+  return ws.pendingCleanup.urls.map(item => {
+    if (typeof item === 'string') {
+      return { url: item, targetWorkspaceId: null };
+    }
+    return { url: item.url, targetWorkspaceId: item.targetWorkspaceId || null };
+  }).filter(item => item.url);
+}
+
+/**
+ * 判断工作区是否有待清理 URL
+ * @param {object} ws - 工作区对象
+ * @returns {boolean}
+ */
+function hasPendingCleanup(ws) {
+  return getPendingCleanupItems(ws).length > 0;
+}
+
+/**
  * 计算浏览器窗口与工作区的标签页 URL 匹配度
  * 默认仅基于工作区当前实际标签页计算，不把 pendingCleanup 计入分数。
  * 当需要识别标签页移出后的原窗口时，可传入 includePendingCleanup=true
@@ -77,19 +102,77 @@ function normalizeUrl(url) {
  * @param {object} chromeWindow - 包含 tabs 的窗口对象
  * @param {object} ws - 工作区对象
  * @param {boolean} [includePendingCleanup=false] - 是否将待清理 URL 纳入匹配
+ * @param {object[]} [allWorkspaces=null] - 全局工作区列表，用于排除移入标签页对匹配的干扰
  * @returns {number} 匹配度分数，范围 0-1
  */
-function calculateWindowMatchScore(chromeWindow, ws, includePendingCleanup = false) {
+function calculateWindowMatchScore(chromeWindow, ws, includePendingCleanup = false, allWorkspaces = null) {
   if (!chromeWindow || !chromeWindow.tabs || chromeWindow.tabs.length === 0) return 0;
   if (!ws) return 0;
 
   const windowUrls = chromeWindow.tabs.map(t => normalizeUrl(t.url)).filter(Boolean);
   let wsUrls = (ws.tabs || []).map(t => normalizeUrl(t.url)).filter(Boolean);
 
-  // 仅在明确需要时把待清理 URL 纳入匹配，避免目标工作区抢占原窗口
-  if (includePendingCleanup && ws.pendingCleanup && ws.pendingCleanup.urls && ws.pendingCleanup.urls.length > 0) {
-    const cleanupUrls = ws.pendingCleanup.urls.map(u => normalizeUrl(u)).filter(Boolean);
-    wsUrls = wsUrls.concat(cleanupUrls);
+  // 当提供全局工作区列表时，若当前工作区本身没有待清理 URL，
+  // 则从当前工作区的匹配 URL 中排除"属于其他源工作区、且目标不是当前工作区"的 URL。
+  // 这样可以避免目标工作区用刚移入的标签页去抢占源工作区窗口，
+  // 同时保证标签页的合法目标工作区仍能正常匹配。
+  if (allWorkspaces && !hasPendingCleanup(ws)) {
+    const cleanupUrlsFromOthers = new Set();
+    allWorkspaces.forEach(other => {
+      if (other.id !== ws.id && hasPendingCleanup(other)) {
+        getPendingCleanupItems(other).forEach(item => {
+          // 只排除目标不是当前工作区的 URL；若目标为 null（旧数据兼容）也排除
+          if (!item.targetWorkspaceId || item.targetWorkspaceId !== ws.id) {
+            const normalized = normalizeUrl(item.url);
+            if (normalized) cleanupUrlsFromOthers.add(normalized);
+          }
+        });
+      }
+    });
+    wsUrls = wsUrls.filter(url => !cleanupUrlsFromOthers.has(url));
+  }
+
+  // 仅在明确需要时把待清理 URL 纳入匹配，帮助识别原窗口
+  if (includePendingCleanup && hasPendingCleanup(ws)) {
+    // 从当前工作区标签页中排除从其他源移入的 URL。
+    // 这些 URL 的源工作区 pendingCleanup 中目标指向当前工作区，
+    // 在当前工作区的源窗口打开时这些标签页还不存在，
+    // 因此不应作为识别源窗口的保留标签页要求。
+    if (allWorkspaces) {
+      const movedInUrls = new Set();
+      allWorkspaces.forEach(other => {
+        if (other.id === ws.id) return;
+        if (hasPendingCleanup(other)) {
+          getPendingCleanupItems(other).forEach(item => {
+            if (item.targetWorkspaceId === ws.id) {
+              const normalized = normalizeUrl(item.url);
+              if (normalized) movedInUrls.add(normalized);
+            }
+          });
+        }
+      });
+      wsUrls = wsUrls.filter(url => !movedInUrls.has(url));
+    }
+
+    const cleanupItems = getPendingCleanupItems(ws);
+    const cleanupUrls = cleanupItems.map(item => normalizeUrl(item.url)).filter(Boolean);
+
+    if (cleanupUrls.length > 0) {
+      const windowUrlSet = new Set(windowUrls);
+      // 源工作区匹配时，要求窗口必须包含所有待清理 URL，
+      // 避免只含部分移出标签页的窗口被错误关联为源窗口。
+      const allCleanupMatched = cleanupUrls.every(url => windowUrlSet.has(url));
+      if (!allCleanupMatched) return 0;
+
+      // 源工作区自身还有保留标签页时，要求窗口至少匹配到一个保留标签页，
+      // 避免只含被移出 URL 的窗口被错认为源窗口。
+      if (wsUrls.length > 0) {
+        const hasMatchingTab = wsUrls.some(url => windowUrlSet.has(url));
+        if (!hasMatchingTab) return 0;
+      }
+
+      wsUrls = wsUrls.concat(cleanupUrls);
+    }
   }
 
   if (windowUrls.length === 0 || wsUrls.length === 0) return 0;
@@ -141,35 +224,24 @@ async function tryAssociateWindowWithWorkspace(chromeWindow) {
   // 优先处理有待清理 URL 的工作区，避免目标工作区抢占原窗口。
   const unassociatedWorkspaces = data.workspaces.filter(ws => !ws.windowId);
   const sortedWorkspaces = unassociatedWorkspaces.slice().sort((a, b) => {
-    const aHasCleanup = a.pendingCleanup && a.pendingCleanup.urls && a.pendingCleanup.urls.length > 0;
-    const bHasCleanup = b.pendingCleanup && b.pendingCleanup.urls && b.pendingCleanup.urls.length > 0;
-    return (bHasCleanup ? 1 : 0) - (aHasCleanup ? 1 : 0);
+    return (hasPendingCleanup(b) ? 1 : 0) - (hasPendingCleanup(a) ? 1 : 0);
   });
 
   let bestMatch = null;
   let bestScore = 0;
 
   for (const ws of sortedWorkspaces) {
-    let wsUrls = ws.tabs.map(t => normalizeUrl(t.url)).filter(Boolean);
-    // 若工作区有待清理 URL，纳入匹配以帮助识别原窗口
-    if (ws.pendingCleanup && ws.pendingCleanup.urls && ws.pendingCleanup.urls.length > 0) {
-      const cleanupUrls = ws.pendingCleanup.urls.map(u => normalizeUrl(u)).filter(Boolean);
-      wsUrls = wsUrls.concat(cleanupUrls);
-    }
-    if (wsUrls.length === 0) continue;
-
-    const matched = windowUrls.filter(url => wsUrls.includes(url)).length;
-    const score = matched / Math.max(windowUrls.length, wsUrls.length);
-
+    // 使用统一匹配函数，传入全局工作区列表以自动排除移入标签页干扰
+    const score = calculateWindowMatchScore(chromeWindow, ws, true, data.workspaces);
     if (score > bestScore) {
       bestScore = score;
       bestMatch = ws;
     }
   }
 
-  // 仅当匹配度严格大于阈值时才建立关联。即使窗口包含待清理 URL，
-  // 也不应在刚好达到阈值时抢占目标工作区窗口，避免源工作区把 B/C 窗口误当原窗口。
-  if (bestMatch && bestScore > WINDOW_MATCH_THRESHOLD) {
+  // 匹配度达到阈值即可建立关联。由于 calculateWindowMatchScore 已排除
+  // 目标工作区用移入标签页抢占源窗口的情况，因此可以使用 >= 阈值。
+  if (bestMatch && bestScore >= WINDOW_MATCH_THRESHOLD) {
     associateWindowWithWorkspaceInternal(chromeWindow, bestMatch);
     bestMatch.updatedAt = nowIso();
     await saveWorkspaces(data);
@@ -190,13 +262,12 @@ async function tryAssociateWindowWithWorkspace(chromeWindow) {
  * @returns {boolean}
  */
 function windowContainsPendingCleanupUrls(chromeWindow, ws) {
-  if (!ws || !ws.pendingCleanup || !ws.pendingCleanup.urls || ws.pendingCleanup.urls.length === 0) {
-    return false;
-  }
+  const cleanupItems = getPendingCleanupItems(ws);
+  if (cleanupItems.length === 0) return false;
   if (!chromeWindow || !chromeWindow.tabs || chromeWindow.tabs.length === 0) return false;
 
   const windowUrls = chromeWindow.tabs.map(t => normalizeUrl(t.url)).filter(Boolean);
-  const cleanupUrls = ws.pendingCleanup.urls.map(u => normalizeUrl(u)).filter(Boolean);
+  const cleanupUrls = cleanupItems.map(item => normalizeUrl(item.url)).filter(Boolean);
   return cleanupUrls.some(url => windowUrls.includes(url));
 }
 
@@ -219,11 +290,10 @@ async function scanOpenWindowsAndAssociate() {
     let associatedCount = 0;
     const matchedWindowIds = new Set();
 
-    // 第一轮：优先处理有待清理 URL 的工作区（标签页移出后的原工作区），
-    // 使用当前标签页 + 待清理 URL 进行匹配，避免目标工作区抢占原窗口。
-    const workspacesWithCleanup = unassociatedWorkspaces.filter(ws =>
-      ws.pendingCleanup && ws.pendingCleanup.urls && ws.pendingCleanup.urls.length > 0
-    );
+    // 第一轮：优先处理有待清理 URL 的工作区（标签页移出后的原工作区）。
+    // 传入全局工作区列表后，calculateWindowMatchScore 对源工作区会纳入待清理 URL，
+    // 对非源工作区会排除其他工作区待清理的 URL，避免目标工作区抢占原窗口。
+    const workspacesWithCleanup = unassociatedWorkspaces.filter(ws => hasPendingCleanup(ws));
     for (const ws of workspacesWithCleanup) {
       let bestMatch = null;
       let bestScore = 0;
@@ -231,15 +301,16 @@ async function scanOpenWindowsAndAssociate() {
       for (const chromeWindow of normalWindows) {
         if (matchedWindowIds.has(chromeWindow.id)) continue;
 
-        const score = calculateWindowMatchScore(chromeWindow, ws, true);
+        const score = calculateWindowMatchScore(chromeWindow, ws, true, data.workspaces);
         if (score > bestScore) {
           bestScore = score;
           bestMatch = chromeWindow;
         }
       }
 
-      // 源工作区必须使用严格大于阈值，防止只含单个待清理 URL 的目标窗口被抢占
-      if (bestMatch && bestScore > WINDOW_MATCH_THRESHOLD) {
+      // 源工作区达到阈值即可关联。由于非源工作区的移入 URL 已被排除，
+      // 不会再出现目标工作区用单个移入 URL 抢占原窗口的情况。
+      if (bestMatch && bestScore >= WINDOW_MATCH_THRESHOLD) {
         associateWindowWithWorkspaceInternal(bestMatch, ws);
         ws.updatedAt = nowIso();
         matchedWindowIds.add(bestMatch.id);
@@ -247,7 +318,7 @@ async function scanOpenWindowsAndAssociate() {
       }
     }
 
-    // 第二轮：处理普通工作区，仅使用当前标签页 URL 匹配。
+    // 第二轮：处理普通工作区，使用当前标签页 URL 匹配（已排除其他工作区待清理 URL）。
     for (const ws of unassociatedWorkspaces) {
       if (ws.windowId || matchedWindowIds.has(ws.windowId)) continue;
 
@@ -257,7 +328,7 @@ async function scanOpenWindowsAndAssociate() {
       for (const chromeWindow of normalWindows) {
         if (matchedWindowIds.has(chromeWindow.id)) continue;
 
-        const score = calculateWindowMatchScore(chromeWindow, ws, false);
+        const score = calculateWindowMatchScore(chromeWindow, ws, false, data.workspaces);
         if (score > bestScore) {
           bestScore = score;
           bestMatch = chromeWindow;
@@ -286,7 +357,7 @@ async function scanOpenWindowsAndAssociate() {
       for (const chromeWindow of normalWindows) {
         if (matchedWindowIds.has(chromeWindow.id)) continue;
 
-        const score = calculateWindowMatchScore(chromeWindow, ws, true);
+        const score = calculateWindowMatchScore(chromeWindow, ws, true, data.workspaces);
         if (score > bestScore) {
           bestScore = score;
           bestMatch = chromeWindow;
@@ -634,10 +705,9 @@ async function moveTabToWorkspace(tabId, sourceWorkspaceId, targetWorkspaceId) {
   // 等源窗口被检测到后自动关闭已移出的标签页。
   if (!sourceWs.windowId) {
     if (!sourceWs.pendingCleanup) {
-      sourceWs.pendingCleanup = { urls: [], targetWorkspaceId: targetWorkspaceId, createdAt: nowIso() };
+      sourceWs.pendingCleanup = { urls: [], createdAt: nowIso() };
     }
-    sourceWs.pendingCleanup.urls.push(movedTab.url);
-    sourceWs.pendingCleanup.targetWorkspaceId = targetWorkspaceId;
+    sourceWs.pendingCleanup.urls.push({ url: movedTab.url, targetWorkspaceId: targetWorkspaceId });
     sourceWs.pendingCleanup.createdAt = nowIso();
     if (!(await hasPendingOperations(sourceWorkspaceId))) {
       await queuePendingOperation(sourceWorkspaceId, 'SYNC', { reason: 'tabs_moved_out' });
@@ -759,10 +829,9 @@ async function moveTabsToWorkspaces(moves) {
       // 等源窗口被检测到后自动关闭已移出的标签页。
       if (!sourceWs.windowId) {
         if (!sourceWs.pendingCleanup) {
-          sourceWs.pendingCleanup = { urls: [], targetWorkspaceId: move.targetWorkspaceId, createdAt: nowIso() };
+          sourceWs.pendingCleanup = { urls: [], createdAt: nowIso() };
         }
-        sourceWs.pendingCleanup.urls.push(tab.url);
-        sourceWs.pendingCleanup.targetWorkspaceId = move.targetWorkspaceId;
+        sourceWs.pendingCleanup.urls.push({ url: tab.url, targetWorkspaceId: move.targetWorkspaceId });
         sourceWs.pendingCleanup.createdAt = nowIso();
       }
 

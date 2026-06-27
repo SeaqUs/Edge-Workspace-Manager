@@ -756,6 +756,113 @@
     assert(manyTargetCAfterMove.tabs.some(t => t.url === 'https://many-a.example.com'), '多对一目标 C 包含 pageA');
     assert(manyTargetCAfterMove.tabs.some(t => t.url === 'https://many-b.example.com'), '多对一目标 C 包含 pageB');
 
+    // 测试 33：多对多 - 工作区既是源又是目标（A→B，C→A），全部关闭后打开
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    await clearPendingOperations();
+    const m2mA = await createWorkspace('多对多 A');
+    const m2mB = await createWorkspace('多对多 B');
+    const m2mC = await createWorkspace('多对多 C');
+    const m2mPageA1 = await addTabToWorkspace(m2mA.id, 'https://m2m-a1.example.com', 'M2M A1');
+    await addTabToWorkspace(m2mA.id, 'https://m2m-a2.example.com', 'M2M A2');
+    const m2mPageB1 = await addTabToWorkspace(m2mB.id, 'https://m2m-b1.example.com', 'M2M B1');
+    const m2mPageC1 = await addTabToWorkspace(m2mC.id, 'https://m2m-c1.example.com', 'M2M C1');
+
+    const m2mDataBefore = await loadWorkspaces();
+    const m2mAFresh = m2mDataBefore.workspaces.find(w => w.id === m2mA.id);
+    const m2mBFresh = m2mDataBefore.workspaces.find(w => w.id === m2mB.id);
+    const m2mCFresh = m2mDataBefore.workspaces.find(w => w.id === m2mC.id);
+    m2mAFresh.windowId = null;
+    m2mAFresh.tabs.forEach(tab => delete tab.realTabId);
+    m2mBFresh.windowId = null;
+    m2mBFresh.tabs.forEach(tab => delete tab.realTabId);
+    m2mCFresh.windowId = null;
+    m2mCFresh.tabs.forEach(tab => delete tab.realTabId);
+    await saveWorkspaces({ version: '1.0.0', workspaces: [m2mAFresh, m2mBFresh, m2mCFresh] });
+
+    const m2mMoves = [
+      { tabId: m2mPageA1.id, sourceWorkspaceId: m2mAFresh.id, targetWorkspaceId: m2mBFresh.id },
+      { tabId: m2mPageC1.id, sourceWorkspaceId: m2mCFresh.id, targetWorkspaceId: m2mAFresh.id }
+    ];
+    assert(await moveTabsToWorkspaces(m2mMoves) === true, '多对多批量移动成功');
+
+    // 模拟 Edge 按原生状态恢复三个窗口：源窗口仍含被移出的标签页，目标窗口不含被移入的标签页
+    const m2mAWindow = await chrome.windows.create({ url: ['https://m2m-a1.example.com', 'https://m2m-a2.example.com'], focused: false });
+    const m2mBWindow = await chrome.windows.create({ url: ['https://m2m-b1.example.com'], focused: false });
+    const m2mCWindow = await chrome.windows.create({ url: ['https://m2m-c1.example.com'], focused: false });
+
+    const m2mScanResult = await scanOpenWindowsAndAssociate();
+    console.log('[TEST_DEBUG] m2m scan associated', m2mScanResult.associated);
+    assert(m2mScanResult.associated >= 3, '多对多扫描至少关联 3 个工作区');
+
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    const m2mAWindowAfter = await chrome.windows.get(m2mAWindow.id, { populate: true });
+    console.log('[TEST_DEBUG] m2mAWindowAfter tabs', m2mAWindowAfter.tabs.map(t => t.url));
+    assert(m2mAWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://m2m-a1.example.com')).length === 0, '多对多 A 窗口中 a1 已关闭');
+    assert(m2mAWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://m2m-c1.example.com')).length === 1, '多对多 A 窗口中恰好有 1 个 c1');
+
+    const m2mBWindowAfter = await chrome.windows.get(m2mBWindow.id, { populate: true });
+    console.log('[TEST_DEBUG] m2mBWindowAfter tabs', m2mBWindowAfter.tabs.map(t => t.url));
+    assert(m2mBWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://m2m-b1.example.com')).length === 1, '多对多 B 窗口保留原 b1');
+    assert(m2mBWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://m2m-a1.example.com')).length === 1, '多对多 B 窗口中恰好有 1 个 a1');
+
+    const m2mCWindowAfter = await chrome.windows.get(m2mCWindow.id, { populate: true });
+    console.log('[TEST_DEBUG] m2mCWindowAfter tabs', m2mCWindowAfter.tabs.map(t => t.url));
+    assert(m2mCWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://m2m-c1.example.com')).length === 0, '多对多 C 窗口中 c1 已关闭');
+
+    // 测试 34：多对多边界 - A 仅含一个被移出的标签页且不含任何保留标签页，A 窗口仅含该移出 URL
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    await clearPendingOperations();
+    const edgeA = await createWorkspace('边界 A');
+    const edgeB = await createWorkspace('边界 B');
+    const edgeC = await createWorkspace('边界 C');
+    const edgePageA1 = await addTabToWorkspace(edgeA.id, 'https://edge-a1.example.com', 'Edge A1');
+    const edgePageB1 = await addTabToWorkspace(edgeB.id, 'https://edge-b1.example.com', 'Edge B1');
+    const edgePageC1 = await addTabToWorkspace(edgeC.id, 'https://edge-c1.example.com', 'Edge C1');
+
+    const edgeDataBefore = await loadWorkspaces();
+    const edgeAFresh = edgeDataBefore.workspaces.find(w => w.id === edgeA.id);
+    const edgeBFresh = edgeDataBefore.workspaces.find(w => w.id === edgeB.id);
+    const edgeCFresh = edgeDataBefore.workspaces.find(w => w.id === edgeC.id);
+    edgeAFresh.windowId = null;
+    edgeAFresh.tabs.forEach(tab => delete tab.realTabId);
+    edgeBFresh.windowId = null;
+    edgeBFresh.tabs.forEach(tab => delete tab.realTabId);
+    edgeCFresh.windowId = null;
+    edgeCFresh.tabs.forEach(tab => delete tab.realTabId);
+    await saveWorkspaces({ version: '1.0.0', workspaces: [edgeAFresh, edgeBFresh, edgeCFresh] });
+
+    const edgeMoves = [
+      { tabId: edgePageA1.id, sourceWorkspaceId: edgeAFresh.id, targetWorkspaceId: edgeBFresh.id },
+      { tabId: edgePageC1.id, sourceWorkspaceId: edgeCFresh.id, targetWorkspaceId: edgeAFresh.id }
+    ];
+    assert(await moveTabsToWorkspaces(edgeMoves) === true, '边界多对多批量移动成功');
+
+    // A 窗口仅含被移出的 a1，B 窗口仅含原 b1，C 窗口仅含被移出的 c1
+    const edgeAWindow = await chrome.windows.create({ url: ['https://edge-a1.example.com'], focused: false });
+    const edgeBWindow = await chrome.windows.create({ url: ['https://edge-b1.example.com'], focused: false });
+    const edgeCWindow = await chrome.windows.create({ url: ['https://edge-c1.example.com'], focused: false });
+
+    const edgeScanResult = await scanOpenWindowsAndAssociate();
+    console.log('[TEST_DEBUG] edge scan associated', edgeScanResult.associated);
+    assert(edgeScanResult.associated >= 3, '边界多对多扫描至少关联 3 个工作区');
+
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    const edgeAWindowAfter = await chrome.windows.get(edgeAWindow.id, { populate: true });
+    console.log('[TEST_DEBUG] edgeAWindowAfter tabs', edgeAWindowAfter.tabs.map(t => t.url));
+    assert(edgeAWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://edge-a1.example.com')).length === 0, '边界 A 窗口中 a1 已关闭');
+    assert(edgeAWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://edge-c1.example.com')).length === 1, '边界 A 窗口中恰好有 1 个 c1');
+
+    const edgeBWindowAfter = await chrome.windows.get(edgeBWindow.id, { populate: true });
+    console.log('[TEST_DEBUG] edgeBWindowAfter tabs', edgeBWindowAfter.tabs.map(t => t.url));
+    assert(edgeBWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://edge-b1.example.com')).length === 1, '边界 B 窗口保留原 b1');
+    assert(edgeBWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://edge-a1.example.com')).length === 1, '边界 B 窗口中恰好有 1 个 a1');
+
+    const edgeCWindowAfter = await chrome.windows.get(edgeCWindow.id, { populate: true });
+    console.log('[TEST_DEBUG] edgeCWindowAfter tabs', edgeCWindowAfter.tabs.map(t => t.url));
+    assert(edgeCWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://edge-c1.example.com')).length === 0, '边界 C 窗口中 c1 已关闭');
+
     // 输出汇总
     summaryEl.textContent = `测试完成：通过 ${passCount} 项，失败 ${failCount} 项`;
     summaryEl.className = failCount === 0 ? 'pass' : 'fail';
