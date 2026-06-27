@@ -4,7 +4,8 @@
  */
 
 // 导入数据层（Manifest V3 service worker 中通过 importScripts 引入）
-importScripts('js/dataStore.js');
+// 使用 chrome.runtime.getURL 获取完整扩展内 URL，避免部分浏览器对相对路径解析不一致
+importScripts(chrome.runtime.getURL('js/dataStore.js'));
 
 /**
  * 扩展安装时初始化默认数据结构
