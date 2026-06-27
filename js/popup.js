@@ -24,6 +24,13 @@
   const btnDeselectAllEl = document.getElementById('btn-deselect-all');
   const btnConfirmImportEl = document.getElementById('btn-confirm-import');
 
+  // 侧边栏导航
+  const navWorkspacesEl = document.getElementById('nav-workspaces');
+  const navImportEl = document.getElementById('nav-import');
+  const statWorkspaceCountEl = document.getElementById('stat-workspace-count');
+  const statOpenedEl = document.getElementById('stat-opened');
+  const statTabsEl = document.getElementById('stat-tabs');
+
   // 当前数据缓存
   let workspaceData = { workspaces: [] };
   // 当前可导入窗口缓存
@@ -59,10 +66,14 @@
     });
 
     // 手动导入面板事件
-    btnCloseImportEl.addEventListener('click', hideImportPanel);
+    btnCloseImportEl.addEventListener('click', () => switchView('workspaces'));
     btnSelectAllEl.addEventListener('click', () => setAllImportCheckboxes(true));
     btnDeselectAllEl.addEventListener('click', () => setAllImportCheckboxes(false));
     btnConfirmImportEl.addEventListener('click', confirmImportSelected);
+
+    // 侧边栏导航
+    navWorkspacesEl.addEventListener('click', () => switchView('workspaces'));
+    navImportEl.addEventListener('click', () => switchView('import'));
   }
 
   /**
@@ -83,21 +94,40 @@
   }
 
   /**
+   * 切换侧边栏导航视图
+   * @param {'workspaces'|'import'} view - 目标视图
+   */
+  async function switchView(view) {
+    if (view === 'workspaces') {
+      navWorkspacesEl.classList.add('active');
+      navImportEl.classList.remove('active');
+      importPanelEl.classList.add('hidden');
+      workspaceListEl.classList.remove('hidden');
+      emptyStateEl.classList.toggle('hidden', workspaceData.workspaces.length > 0);
+      await loadAndRender();
+    } else if (view === 'import') {
+      navWorkspacesEl.classList.remove('active');
+      navImportEl.classList.add('active');
+      importPanelEl.classList.remove('hidden');
+      workspaceListEl.classList.add('hidden');
+      emptyStateEl.classList.add('hidden');
+      createPanelEl.classList.add('hidden');
+      await loadAndRenderImportableWindows();
+    }
+  }
+
+  /**
    * 显示手动导入面板并加载可导入窗口
    */
   async function showImportPanel() {
-    createPanelEl.classList.add('hidden');
-    importPanelEl.classList.remove('hidden');
-    await loadAndRenderImportableWindows();
+    await switchView('import');
   }
 
   /**
    * 隐藏手动导入面板
    */
   function hideImportPanel() {
-    importPanelEl.classList.add('hidden');
-    importWindowListEl.innerHTML = '';
-    importableWindows = [];
+    switchView('workspaces');
   }
 
   /**
@@ -150,7 +180,7 @@
       title.textContent = win.title || `窗口 ${win.id}`;
 
       const tabs = document.createElement('div');
-      tabs.className = 'import-window-tabs';
+      tabs.className = 'import-window-meta';
       tabs.textContent = `${win.tabCount} 个标签页`;
 
       info.appendChild(title);
@@ -238,6 +268,7 @@
       if (response && response.success) {
         workspaceData = response.data;
         renderWorkspaceList();
+        updateSidebarStats();
         hideError();
       } else {
         showError(response && response.error ? response.error : '加载数据失败');
@@ -245,6 +276,19 @@
     } catch (error) {
       showError(`加载数据失败: ${error.message}`);
     }
+  }
+
+  /**
+   * 更新侧边栏统计数据
+   */
+  function updateSidebarStats() {
+    const workspaces = workspaceData.workspaces || [];
+    const openedCount = workspaces.filter(ws => ws.windowId).length;
+    const totalTabs = workspaces.reduce((sum, ws) => sum + (ws.tabs ? ws.tabs.length : 0), 0);
+
+    statWorkspaceCountEl.textContent = workspaces.length;
+    statOpenedEl.textContent = openedCount;
+    statTabsEl.textContent = totalTabs;
   }
 
   /**
@@ -281,37 +325,40 @@
     card.addEventListener('dragleave', handleWorkspaceDragLeave);
     card.addEventListener('drop', handleWorkspaceDrop);
 
-    // 头部：名称与操作按钮
+    // 头部：名称、状态与操作按钮
     const header = document.createElement('div');
     header.className = 'workspace-header';
 
-    const nameEl = document.createElement('div');
+    const titleEl = document.createElement('div');
+    titleEl.className = 'workspace-title';
+
+    const nameEl = document.createElement('button');
     nameEl.className = 'workspace-name';
+    nameEl.type = 'button';
     nameEl.textContent = ws.name;
     nameEl.title = ws.windowId ? '点击关闭工作区窗口' : '点击打开工作区';
     nameEl.addEventListener('click', () => toggleWorkspace(ws.id));
+
+    const statusEl = document.createElement('span');
+    statusEl.className = `workspace-status ${ws.windowId ? 'open' : 'closed'}`;
+    statusEl.innerHTML = `<span class="status-dot"></span>${ws.windowId ? '已打开' : '未打开'}`;
+
+    titleEl.appendChild(nameEl);
+    titleEl.appendChild(statusEl);
 
     const actionsEl = document.createElement('div');
     actionsEl.className = 'workspace-actions';
 
     const openBtn = document.createElement('button');
-    openBtn.className = 'btn btn-small btn-primary';
+    openBtn.className = 'btn btn-small btn-secondary';
     openBtn.type = 'button';
     openBtn.textContent = ws.windowId ? '关闭' : '打开';
     openBtn.addEventListener('click', () => toggleWorkspace(ws.id));
 
-    const deleteBtn = document.createElement('button');
-    deleteBtn.className = 'btn btn-small btn-danger';
-    deleteBtn.type = 'button';
-    deleteBtn.textContent = '删除';
-    deleteBtn.addEventListener('click', () => deleteWorkspace(ws.id));
-
-    actionsEl.appendChild(openBtn);
-
     // 仅当窗口已打开时显示同步按钮
     if (ws.windowId) {
       const syncBtn = document.createElement('button');
-      syncBtn.className = 'btn btn-small btn-sync';
+      syncBtn.className = 'btn btn-small btn-secondary';
       syncBtn.type = 'button';
       syncBtn.textContent = '同步';
       syncBtn.title = '将工作区与当前窗口标签页强制同步';
@@ -319,22 +366,32 @@
       actionsEl.appendChild(syncBtn);
     }
 
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'btn btn-small btn-text';
+    deleteBtn.type = 'button';
+    deleteBtn.textContent = '删除';
+    deleteBtn.addEventListener('click', () => deleteWorkspace(ws.id));
+
+    actionsEl.appendChild(openBtn);
     actionsEl.appendChild(deleteBtn);
-    header.appendChild(nameEl);
+    header.appendChild(titleEl);
     header.appendChild(actionsEl);
 
-    // 元信息：标签页数量、分组数量与窗口状态
+    // 主体区域
+    const body = document.createElement('div');
+    body.className = 'workspace-body';
+
+    // 元信息：标签页数量、分组数量与更新时间
     const meta = document.createElement('div');
     meta.className = 'workspace-meta';
     const groupCount = ws.groups ? ws.groups.length : 0;
     meta.innerHTML = `
-      <span>标签页: ${ws.tabs ? ws.tabs.length : 0}</span>
-      <span>分组: ${groupCount}</span>
-      <span>状态: ${ws.windowId ? '已打开' : '未打开'}</span>
+      <div class="workspace-meta-left">
+        <span>${ws.tabs ? ws.tabs.length : 0} 标签页</span>
+        <span>${groupCount} 分组</span>
+      </div>
+      <span>${formatDate(ws.updatedAt)}</span>
     `;
-
-    // 分组区域
-    const groupSection = buildGroupSection(ws);
 
     // 标签页列表
     const tabList = document.createElement('div');
@@ -351,11 +408,19 @@
         const tabItem = buildTabItem(ws, tab);
         tabList.appendChild(tabItem);
       });
+    } else {
+      const emptyTabs = document.createElement('div');
+      emptyTabs.className = 'empty-tabs';
+      emptyTabs.textContent = '暂无标签页，点击下方添加';
+      tabList.appendChild(emptyTabs);
     }
 
+    // 分组区域
+    const groupSection = buildGroupSection(ws);
+
     // 添加标签页输入区
-    const addTabRow = document.createElement('div');
-    addTabRow.className = 'add-tab-row';
+    const addTabForm = document.createElement('div');
+    addTabForm.className = 'add-tab-form';
 
     const tabInput = document.createElement('input');
     tabInput.type = 'text';
@@ -376,14 +441,16 @@
       tabInput.value = '';
     });
 
-    addTabRow.appendChild(tabInput);
-    addTabRow.appendChild(addTabBtn);
+    addTabForm.appendChild(tabInput);
+    addTabForm.appendChild(addTabBtn);
+
+    body.appendChild(meta);
+    body.appendChild(tabList);
+    body.appendChild(groupSection);
+    body.appendChild(addTabForm);
 
     card.appendChild(header);
-    card.appendChild(meta);
-    card.appendChild(groupSection);
-    card.appendChild(tabList);
-    card.appendChild(addTabRow);
+    card.appendChild(body);
 
     return card;
   }
@@ -399,14 +466,20 @@
 
     // 分组标题行
     const headerRow = document.createElement('div');
-    headerRow.className = 'group-header-row';
+    headerRow.className = 'group-header';
 
+    const nameEl = document.createElement('div');
+    nameEl.className = 'group-name';
+    const colorDot = document.createElement('span');
+    colorDot.className = 'group-color';
+    colorDot.style.backgroundColor = '#cbd5e1';
     const title = document.createElement('span');
-    title.className = 'group-section-title';
     title.textContent = '分组';
+    nameEl.appendChild(colorDot);
+    nameEl.appendChild(title);
 
     const createGroupBtn = document.createElement('button');
-    createGroupBtn.className = 'btn btn-small btn-secondary';
+    createGroupBtn.className = 'btn btn-text btn-small';
     createGroupBtn.type = 'button';
     createGroupBtn.textContent = '新建分组';
     createGroupBtn.addEventListener('click', () => {
@@ -416,33 +489,34 @@
       }
     });
 
-    headerRow.appendChild(title);
+    headerRow.appendChild(nameEl);
     headerRow.appendChild(createGroupBtn);
     section.appendChild(headerRow);
 
     // 分组列表
     if (ws.groups && ws.groups.length > 0) {
       const list = document.createElement('div');
-      list.className = 'group-list';
+      list.className = 'group-tabs';
 
       ws.groups.forEach((group) => {
         const groupItem = document.createElement('div');
-        groupItem.className = 'group-item';
+        groupItem.className = 'tab-item';
+        groupItem.style.cursor = 'default';
 
-        const colorDot = document.createElement('span');
-        colorDot.className = 'group-color-dot';
-        colorDot.style.backgroundColor = group.color || '#999999';
+        const gColorDot = document.createElement('span');
+        gColorDot.className = 'group-color';
+        gColorDot.style.backgroundColor = group.color || '#999999';
 
         const groupName = document.createElement('span');
-        groupName.className = 'group-name';
+        groupName.className = 'tab-title';
         groupName.textContent = group.name;
 
         const tabCount = ws.tabs.filter(t => t.groupId === group.id).length;
         const countBadge = document.createElement('span');
-        countBadge.className = 'group-count';
+        countBadge.className = 'tab-group-select';
         countBadge.textContent = `${tabCount} 标签页`;
 
-        groupItem.appendChild(colorDot);
+        groupItem.appendChild(gColorDot);
         groupItem.appendChild(groupName);
         groupItem.appendChild(countBadge);
         list.appendChild(groupItem);
@@ -507,17 +581,22 @@
       assignTabToGroup(ws.id, tab.id, groupSelect.value || null);
     });
 
+    const actionsEl = document.createElement('div');
+    actionsEl.className = 'tab-actions';
+
     const removeBtn = document.createElement('button');
-    removeBtn.className = 'tab-remove';
+    removeBtn.className = 'btn btn-text btn-small';
     removeBtn.type = 'button';
-    removeBtn.textContent = '×';
+    removeBtn.textContent = '移除';
     removeBtn.title = '移除标签页';
     removeBtn.addEventListener('click', () => removeTab(ws.id, tab.id));
 
+    actionsEl.appendChild(groupSelect);
+    actionsEl.appendChild(removeBtn);
+
     item.appendChild(favicon);
     item.appendChild(title);
-    item.appendChild(groupSelect);
-    item.appendChild(removeBtn);
+    item.appendChild(actionsEl);
 
     return item;
   }
@@ -838,10 +917,19 @@
 
     const afterElement = getDragAfterElement(tabList, event.clientY);
     const children = [...tabList.querySelectorAll('.tab-item')];
-    let targetIndex = children.length;
+    const draggedElement = tabList.querySelector('.tab-item.dragging');
+    const currentIndex = draggedElement ? children.indexOf(draggedElement) : -1;
 
-    if (afterElement) {
+    let targetIndex;
+    if (!afterElement) {
+      // 放置到列表末尾（需减去被拖拽元素自身占用的一个位置）
+      targetIndex = children.length - 1;
+    } else {
       targetIndex = children.indexOf(afterElement);
+      // 若向下拖拽，移除自身后目标索引会前移一位，需补偿
+      if (currentIndex !== -1 && currentIndex < targetIndex) {
+        targetIndex--;
+      }
     }
 
     clearDropIndicators();
@@ -969,19 +1057,22 @@
   }
 
   /**
-   * 在头部追加导入管理按钮
-   * 因 popup.js 在 DOM 构建后引入，此处直接操作 header
+   * 格式化 ISO 时间为易读字符串
+   * @param {string} isoString - ISO 8601 时间字符串
+   * @returns {string} 格式化后的时间
    */
-  const appHeader = document.querySelector('.app-header');
-  if (appHeader) {
-    const importManageBtn = document.createElement('button');
-    importManageBtn.className = 'btn btn-secondary';
-    importManageBtn.type = 'button';
-    importManageBtn.textContent = '导入管理';
-    importManageBtn.title = '手动选择 Edge 窗口导入为扩展工作区';
-    importManageBtn.style.marginLeft = '8px';
-    importManageBtn.addEventListener('click', showImportPanel);
+  function formatDate(isoString) {
+    if (!isoString) return '';
+    const date = new Date(isoString);
+    if (isNaN(date.getTime())) return isoString;
 
-    appHeader.appendChild(importManageBtn);
+    const now = new Date();
+    const isToday = date.toDateString() === now.toDateString();
+    const timeStr = date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+
+    if (isToday) {
+      return `今天 ${timeStr}`;
+    }
+    return `${date.toLocaleDateString('zh-CN')} ${timeStr}`;
   }
 })();

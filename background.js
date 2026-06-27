@@ -306,6 +306,18 @@ async function handleMessage(request, sender, sendResponse) {
 chrome.action.onClicked.addListener(async () => {
   try {
     const panelUrl = chrome.runtime.getURL('popup.html');
+
+    // 若已有管理面板窗口，则聚焦而不是重复创建
+    const existing = await chrome.windows.getAll({ populate: true });
+    const panelWindow = existing.find(w =>
+      w.tabs && w.tabs.some(t => t.url && t.url.startsWith(panelUrl))
+    );
+
+    if (panelWindow) {
+      await chrome.windows.update(panelWindow.id, { focused: true });
+      return;
+    }
+
     await chrome.windows.create({
       url: panelUrl,
       type: 'normal',

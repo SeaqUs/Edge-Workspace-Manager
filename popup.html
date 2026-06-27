@@ -7,50 +7,111 @@
   <link rel="stylesheet" href="css/popup.css">
 </head>
 <body>
-  <div class="app-container">
-    <!-- 头部标题与新建按钮 -->
-    <header class="app-header">
-      <h1 class="app-title">工作区管理</h1>
-      <button id="btn-create-workspace" class="btn btn-primary" type="button">新建工作区</button>
-    </header>
+  <div class="app-shell">
+    <!-- 侧边栏 -->
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <div class="brand-icon">
+          <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
+            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <div class="brand-title">工作区管理</div>
+          <div class="brand-subtitle">Edge Workspace</div>
+        </div>
+      </div>
 
-    <!-- 新建工作区输入区 -->
-    <section id="create-panel" class="create-panel hidden">
-      <input id="input-workspace-name" type="text" placeholder="输入工作区名称" autocomplete="off">
-      <div class="button-row">
-        <button id="btn-confirm-create" class="btn btn-primary" type="button">确认</button>
-        <button id="btn-cancel-create" class="btn btn-secondary" type="button">取消</button>
-      </div>
-    </section>
+      <nav class="sidebar-nav">
+        <button id="nav-workspaces" class="nav-item active" type="button">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
+          <span>全部工作区</span>
+          <span id="stat-workspace-count" class="nav-badge">0</span>
+        </button>
+        <button id="nav-import" class="nav-item" type="button">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+          <span>导入窗口</span>
+        </button>
+      </nav>
 
-    <!-- 手动导入管理面板 -->
-    <section id="import-panel" class="import-panel hidden">
-      <div class="import-panel-header">
-        <h2>选择要导入的窗口</h2>
-        <button id="btn-close-import" class="btn btn-small btn-secondary" type="button">关闭</button>
+      <div class="sidebar-stats">
+        <div class="stat-row">
+          <span class="stat-label">已打开</span>
+          <span id="stat-opened" class="stat-value">0</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">标签页</span>
+          <span id="stat-tabs" class="stat-value">0</span>
+        </div>
       </div>
-      <div id="import-window-list" class="import-window-list">
-        <!-- 动态渲染可选窗口 -->
-      </div>
-      <div class="button-row">
-        <button id="btn-select-all" class="btn btn-small btn-secondary" type="button">全选</button>
-        <button id="btn-deselect-all" class="btn btn-small btn-secondary" type="button">全不选</button>
-        <button id="btn-confirm-import" class="btn btn-primary" type="button">导入选中</button>
-      </div>
-    </section>
+    </aside>
 
-    <!-- 工作区列表 -->
-    <main id="workspace-list" class="workspace-list">
-      <!-- 动态渲染工作区卡片 -->
+    <!-- 主内容区 -->
+    <main class="main-content">
+      <!-- 顶部栏 -->
+      <header class="top-bar">
+        <div class="top-bar-left">
+          <h2 class="page-title">全部工作区</h2>
+          <p class="page-subtitle">管理并同步 Edge 浏览器窗口与标签页</p>
+        </div>
+        <div class="top-bar-right">
+          <button id="btn-create-workspace" class="btn btn-primary" type="button">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+            <span>新建工作区</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- 新建工作区输入区 -->
+      <section id="create-panel" class="create-panel hidden">
+        <div class="panel-card">
+          <h3>新建工作区</h3>
+          <input id="input-workspace-name" type="text" placeholder="输入工作区名称" autocomplete="off">
+          <div class="button-row">
+            <button id="btn-confirm-create" class="btn btn-primary" type="button">确认</button>
+            <button id="btn-cancel-create" class="btn btn-secondary" type="button">取消</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 手动导入管理面板 -->
+      <section id="import-panel" class="import-panel hidden">
+        <div class="panel-card">
+          <div class="import-panel-header">
+            <div>
+              <h3>导入窗口</h3>
+              <p class="panel-subtitle">选择当前已打开的 Edge 窗口导入为工作区</p>
+            </div>
+            <button id="btn-close-import" class="btn btn-secondary" type="button">关闭</button>
+          </div>
+          <div id="import-window-list" class="import-window-list">
+            <!-- 动态渲染可选窗口 -->
+          </div>
+          <div class="button-row">
+            <button id="btn-select-all" class="btn btn-small btn-secondary" type="button">全选</button>
+            <button id="btn-deselect-all" class="btn btn-small btn-secondary" type="button">全不选</button>
+            <button id="btn-confirm-import" class="btn btn-primary" type="button">导入选中</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 工作区列表 -->
+      <section id="workspace-list" class="workspace-list">
+        <!-- 动态渲染工作区卡片 -->
+      </section>
+
+      <!-- 空状态提示 -->
+      <div id="empty-state" class="empty-state hidden">
+        <div class="empty-icon">
+          <svg viewBox="0 0 24 24" width="48" height="48" fill="currentColor"><path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10z"/></svg>
+        </div>
+        <h3>暂无工作区</h3>
+        <p>点击右上角“新建工作区”开始，或通过“导入窗口”导入现有 Edge 窗口。</p>
+      </div>
+
+      <!-- 错误提示 -->
+      <div id="error-message" class="error-message hidden"></div>
     </main>
-
-    <!-- 空状态提示 -->
-    <div id="empty-state" class="empty-state hidden">
-      <p>暂无工作区，点击右上角按钮创建。</p>
-    </div>
-
-    <!-- 错误提示 -->
-    <div id="error-message" class="error-message hidden"></div>
   </div>
 
   <!-- 引入数据层与 popup 逻辑 -->

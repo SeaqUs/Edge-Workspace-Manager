@@ -368,6 +368,19 @@ async function openWorkspace(workspaceId) {
         }
       });
     }
+
+    // 去重：打开窗口时会触发 tabs.onCreated，可能重复写入标签页
+    // 以真实标签页 ID 为键，保留原有顺序中的第一条记录
+    const seenRealTabIds = new Set();
+    ws.tabs = ws.tabs.filter((tab) => {
+      if (!tab.realTabId) return true;
+      if (seenRealTabIds.has(tab.realTabId)) {
+        return false;
+      }
+      seenRealTabIds.add(tab.realTabId);
+      return true;
+    });
+
     ws.updatedAt = nowIso();
     await saveWorkspaces(data);
     return ws;
@@ -619,6 +632,19 @@ async function syncWorkspaceFromWindow(workspaceId) {
     return true;
   } catch (error) {
     console.error('[Edge Workspace Manager] 同步工作区失败:', error);
+    // 窗口不存在或权限异常时，解除关联避免状态错误
+    try {
+      const data = await loadWorkspaces();
+      const ws = data.workspaces.find(w => w.id === workspaceId);
+      if (ws && ws.windowId) {
+        ws.windowId = null;
+        ws.tabs.forEach(tab => delete tab.realTabId);
+        ws.updatedAt = nowIso();
+        await saveWorkspaces(data);
+      }
+    } catch (clearError) {
+      console.error('[Edge Workspace Manager] 清除窗口关联失败:', clearError);
+    }
     return false;
   }
 }
