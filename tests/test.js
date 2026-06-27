@@ -339,6 +339,145 @@
     console.log('[TEST_DEBUG] sourceAfterClosedMove pendingCleanup', JSON.stringify(sourceAfterClosedMove.pendingCleanup));
     assert(!sourceAfterClosedMove.pendingCleanup, '同步后源工作区 pendingCleanup 已清除');
 
+    // 测试 26：两个相同 URL 标签页从关闭源工作区移到关闭目标工作区，打开后不重复创建
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    await clearPendingOperations();
+    const dupSourceWs = await createWorkspace('重复 URL 源工作区');
+    const dupTargetWs = await createWorkspace('重复 URL 目标工作区');
+    await addTabToWorkspace(dupSourceWs.id, 'https://note.ms/test', 'Note.ms A');
+    await addTabToWorkspace(dupSourceWs.id, 'https://note.ms/test', 'Note.ms B');
+
+    const dupDataBeforeMove = await loadWorkspaces();
+    const dupSourceFresh = dupDataBeforeMove.workspaces.find(w => w.id === dupSourceWs.id);
+    const dupTargetFresh = dupDataBeforeMove.workspaces.find(w => w.id === dupTargetWs.id);
+    dupSourceFresh.windowId = null;
+    dupSourceFresh.tabs.forEach(tab => delete tab.realTabId);
+    dupTargetFresh.windowId = null;
+    dupTargetFresh.tabs.forEach(tab => delete tab.realTabId);
+    await saveWorkspaces({ version: '1.0.0', workspaces: [dupSourceFresh, dupTargetFresh] });
+
+    // 逐个移动两个相同 URL 的标签页
+    const dupTabA = dupSourceFresh.tabs[0];
+    const dupTabB = dupSourceFresh.tabs[1];
+    assert(await moveTabToWorkspace(dupTabA.id, dupSourceFresh.id, dupTargetFresh.id) === true, '第一个重复 URL 标签页移动成功');
+    assert(await moveTabToWorkspace(dupTabB.id, dupSourceFresh.id, dupTargetFresh.id) === true, '第二个重复 URL 标签页移动成功');
+
+    const dupDataAfterMove = await loadWorkspaces();
+    const dupTargetAfterMove = dupDataAfterMove.workspaces.find(w => w.id === dupTargetFresh.id);
+    console.log('[TEST_DEBUG] dupTargetAfterMove tabs', dupTargetAfterMove.tabs.map(t => t.url));
+    assert(dupTargetAfterMove.tabs.length === 2, '目标工作区包含 2 个 note.ms 标签页');
+
+    // 模拟用户打开源和目标窗口
+    const dupSourceWindow = await chrome.windows.create({ url: ['https://note.ms/test', 'https://note.ms/test'], focused: false });
+    const dupTargetWindow = await chrome.windows.create({ url: ['https://note.ms/test'], focused: false });
+    console.log('[TEST_DEBUG] dupSourceWindow id', dupSourceWindow.id, 'tabs', dupSourceWindow.tabs.map(t => t.url));
+    console.log('[TEST_DEBUG] dupTargetWindow id', dupTargetWindow.id, 'tabs', dupTargetWindow.tabs.map(t => t.url));
+
+    // 清理 mock 中此前测试遗留的窗口，避免 scanOpenWindowsAndAssociate 关联到错误窗口
+    const allWindowsBeforeDupScan = await chrome.windows.getAll({ populate: true });
+    for (const win of allWindowsBeforeDupScan) {
+      if (win.id !== dupSourceWindow.id && win.id !== dupTargetWindow.id) {
+        try {
+          await chrome.windows.remove(win.id);
+        } catch (e) {
+          // 忽略清理失败
+        }
+      }
+    }
+
+    const dupScanResult = await scanOpenWindowsAndAssociate();
+    console.log('[TEST_DEBUG] dup scan associated', dupScanResult.associated);
+    const dupDataAfterScan = await loadWorkspaces();
+    console.log('[TEST_DEBUG] dup workspaces after scan', JSON.stringify(dupDataAfterScan.workspaces.map(w => ({ id: w.id, windowId: w.windowId, tabs: w.tabs.map(t => ({ url: t.url, realTabId: t.realTabId })) }))));
+    assert(dupScanResult.associated >= 2, '扫描至少关联 2 个工作区');
+
+    // 等待 mock 中 tabs.onCreated / tabs.onUpdated 事件处理完成
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    // 源窗口中两个 note.ms 都应被关闭
+    const dupSourceWindowAfter = await chrome.windows.get(dupSourceWindow.id, { populate: true });
+    console.log('[TEST_DEBUG] dupSourceWindowAfter tabs', dupSourceWindowAfter.tabs.map(t => t.url));
+    assert(dupSourceWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://note.ms/test')).length === 0, '源窗口中两个 note.ms 都已关闭');
+
+    // 目标窗口中应恰好有 2 个 note.ms，不能重复
+    const dupTargetWindowAfter = await chrome.windows.get(dupTargetWindow.id, { populate: true });
+    console.log('[TEST_DEBUG] dupTargetWindowAfter tabs', dupTargetWindowAfter.tabs.map(t => t.url));
+    assert(dupTargetWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://note.ms/test')).length === 2, '目标窗口中恰好有 2 个 note.ms');
+
+    const dupDataFinal = await loadWorkspaces();
+    const dupTargetFinal = dupDataFinal.workspaces.find(w => w.id === dupTargetFresh.id);
+    console.log('[TEST_DEBUG] dupTargetFinal tabs', dupTargetFinal.tabs.map(t => ({ url: t.url, realTabId: t.realTabId })));
+    assert(dupTargetFinal.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://note.ms/test')).length === 2, '目标工作区影子数据中恰好有 2 个 note.ms');
+    // 真实窗口与影子数据库标签页数量应保持一致
+    assert(dupTargetFinal.tabs.length === dupTargetWindowAfter.tabs.length, '目标工作区影子标签页数与真实窗口标签页数一致');
+
+    // 测试 27：目标窗口已通过 Edge 原生按钮恢复并包含 2 个 note.ms，同步后不应出现第三个
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    await clearPendingOperations();
+    const nativeSourceWs = await createWorkspace('原生恢复源工作区');
+    const nativeTargetWs = await createWorkspace('原生恢复目标工作区');
+    await addTabToWorkspace(nativeSourceWs.id, 'https://note.ms/test', 'Note.ms A');
+    await addTabToWorkspace(nativeSourceWs.id, 'https://note.ms/test', 'Note.ms B');
+
+    const nativeDataBeforeMove = await loadWorkspaces();
+    const nativeSourceFresh = nativeDataBeforeMove.workspaces.find(w => w.id === nativeSourceWs.id);
+    const nativeTargetFresh = nativeDataBeforeMove.workspaces.find(w => w.id === nativeTargetWs.id);
+    nativeSourceFresh.windowId = null;
+    nativeSourceFresh.tabs.forEach(tab => delete tab.realTabId);
+    nativeTargetFresh.windowId = null;
+    nativeTargetFresh.tabs.forEach(tab => delete tab.realTabId);
+    await saveWorkspaces({ version: '1.0.0', workspaces: [nativeSourceFresh, nativeTargetFresh] });
+
+    const nativeTabA = nativeSourceFresh.tabs[0];
+    const nativeTabB = nativeSourceFresh.tabs[1];
+    assert(await moveTabToWorkspace(nativeTabA.id, nativeSourceFresh.id, nativeTargetFresh.id) === true, '原生恢复场景第一个 note.ms 移动成功');
+    assert(await moveTabToWorkspace(nativeTabB.id, nativeSourceFresh.id, nativeTargetFresh.id) === true, '原生恢复场景第二个 note.ms 移动成功');
+
+    const nativeDataAfterMove = await loadWorkspaces();
+    const nativeTargetAfterMove = nativeDataAfterMove.workspaces.find(w => w.id === nativeTargetFresh.id);
+    assert(nativeTargetAfterMove.tabs.length === 2, '原生恢复场景目标工作区包含 2 个 note.ms 标签页');
+
+    // 模拟 Edge 原生按钮恢复出的源窗口和目标窗口，均包含 2 个 note.ms
+    const nativeSourceWindow = await chrome.windows.create({ url: ['https://note.ms/test', 'https://note.ms/test'], focused: false });
+    const nativeTargetWindow = await chrome.windows.create({ url: ['https://note.ms/test', 'https://note.ms/test'], focused: false });
+    console.log('[TEST_DEBUG] nativeSourceWindow id', nativeSourceWindow.id, 'tabs', nativeSourceWindow.tabs.map(t => t.url));
+    console.log('[TEST_DEBUG] nativeTargetWindow id', nativeTargetWindow.id, 'tabs', nativeTargetWindow.tabs.map(t => t.url));
+
+    // 清理 mock 中此前测试遗留的窗口
+    const allWindowsBeforeNativeScan = await chrome.windows.getAll({ populate: true });
+    for (const win of allWindowsBeforeNativeScan) {
+      if (win.id !== nativeSourceWindow.id && win.id !== nativeTargetWindow.id) {
+        try {
+          await chrome.windows.remove(win.id);
+        } catch (e) {
+          // 忽略清理失败
+        }
+      }
+    }
+
+    const nativeScanResult = await scanOpenWindowsAndAssociate();
+    console.log('[TEST_DEBUG] native scan associated', nativeScanResult.associated);
+    const nativeDataAfterScan = await loadWorkspaces();
+    console.log('[TEST_DEBUG] native workspaces after scan', JSON.stringify(nativeDataAfterScan.workspaces.map(w => ({ id: w.id, windowId: w.windowId, tabs: w.tabs.map(t => ({ url: t.url, realTabId: t.realTabId })) }))));
+    assert(nativeScanResult.associated >= 2, '原生恢复场景扫描至少关联 2 个工作区');
+
+    // 等待 mock 中 tabs.onCreated / tabs.onUpdated 事件处理完成
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    const nativeSourceWindowAfter = await chrome.windows.get(nativeSourceWindow.id, { populate: true });
+    console.log('[TEST_DEBUG] nativeSourceWindowAfter tabs', nativeSourceWindowAfter.tabs.map(t => t.url));
+    assert(nativeSourceWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://note.ms/test')).length === 0, '原生恢复场景源窗口中两个 note.ms 都已关闭');
+
+    const nativeTargetWindowAfter = await chrome.windows.get(nativeTargetWindow.id, { populate: true });
+    console.log('[TEST_DEBUG] nativeTargetWindowAfter tabs', nativeTargetWindowAfter.tabs.map(t => t.url));
+    assert(nativeTargetWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://note.ms/test')).length === 2, '原生恢复场景目标窗口中恰好有 2 个 note.ms');
+
+    const nativeDataFinal = await loadWorkspaces();
+    const nativeTargetFinal = nativeDataFinal.workspaces.find(w => w.id === nativeTargetFresh.id);
+    console.log('[TEST_DEBUG] nativeTargetFinal tabs', nativeTargetFinal.tabs.map(t => ({ url: t.url, realTabId: t.realTabId })));
+    assert(nativeTargetFinal.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://note.ms/test')).length === 2, '原生恢复场景目标工作区影子数据中恰好有 2 个 note.ms');
+    assert(nativeTargetFinal.tabs.length === nativeTargetWindowAfter.tabs.length, '原生恢复场景目标工作区影子标签页数与真实窗口标签页数一致');
+
     // 输出汇总
     summaryEl.textContent = `测试完成：通过 ${passCount} 项，失败 ${failCount} 项`;
     summaryEl.className = failCount === 0 ? 'pass' : 'fail';

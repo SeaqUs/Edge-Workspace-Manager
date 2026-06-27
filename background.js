@@ -29,6 +29,9 @@ const WINDOW_MATCH_THRESHOLD_STRICT = 0.8;
 // 待执行操作队列的存储键名
 const PENDING_OPS_KEY = 'pendingOperations';
 
+// 防止 syncWorkspaceToWindow 并发执行的锁集合
+const syncWorkspaceLocks = new Set();
+
 /**
  * 生成唯一 ID
  * @param {string} prefix - ID 前缀，例如 'ws' / 'tab' / 'group'
@@ -76,17 +79,18 @@ function normalizeUrl(url) {
  * 计算浏览器窗口与工作区的标签页 URL 匹配度
  * @param {object} chromeWindow - 包含 tabs 的窗口对象
  * @param {object} ws - 工作区对象
+ * @param {boolean} [includePendingCleanup=false] - 是否将待清理 URL 纳入匹配
  * @returns {number} 匹配度分数，范围 0-1
  */
-function calculateWindowMatchScore(chromeWindow, ws) {
+function calculateWindowMatchScore(chromeWindow, ws, includePendingCleanup = false) {
   if (!chromeWindow || !chromeWindow.tabs || chromeWindow.tabs.length === 0) return 0;
   if (!ws) return 0;
 
   const windowUrls = chromeWindow.tabs.map(t => normalizeUrl(t.url)).filter(Boolean);
   let wsUrls = (ws.tabs || []).map(t => normalizeUrl(t.url)).filter(Boolean);
 
-  // 若工作区有待清理 URL，也纳入匹配评分，帮助识别移出标签页后的原窗口
-  if (ws.pendingCleanup && ws.pendingCleanup.urls && ws.pendingCleanup.urls.length > 0) {
+  // 仅在明确需要时把待清理 URL 纳入匹配，避免目标工作区抢占原窗口
+  if (includePendingCleanup && ws.pendingCleanup && ws.pendingCleanup.urls && ws.pendingCleanup.urls.length > 0) {
     const cleanupUrls = ws.pendingCleanup.urls.map(u => normalizeUrl(u)).filter(Boolean);
     wsUrls = wsUrls.concat(cleanupUrls);
   }
@@ -107,10 +111,18 @@ function associateWindowWithWorkspaceInternal(chromeWindow, ws) {
   if (!chromeWindow || !chromeWindow.id || !ws) return;
 
   ws.windowId = chromeWindow.id;
+
+  // 记录每个规范化 URL 已使用过的真实标签页 ID，
+  // 避免多个同 URL 影子标签页映射到同一个真实标签页。
+  const usedRealTabIds = new Set();
   ws.tabs.forEach((tab) => {
-    const chromeTab = chromeWindow.tabs.find(t => normalizeUrl(t.url) === normalizeUrl(tab.url));
+    const chromeTab = chromeWindow.tabs.find(t => {
+      const matched = normalizeUrl(t.url) === normalizeUrl(tab.url);
+      return matched && !usedRealTabIds.has(t.id);
+    });
     if (chromeTab) {
       tab.realTabId = chromeTab.id;
+      usedRealTabIds.add(chromeTab.id);
     } else {
       delete tab.realTabId;
     }
@@ -129,13 +141,24 @@ async function tryAssociateWindowWithWorkspace(chromeWindow) {
   const windowUrls = chromeWindow.tabs.map(t => normalizeUrl(t.url)).filter(Boolean);
   if (windowUrls.length === 0) return false;
 
+  // 优先处理有待清理 URL 的工作区，避免目标工作区抢占原窗口。
+  const unassociatedWorkspaces = data.workspaces.filter(ws => !ws.windowId);
+  const sortedWorkspaces = unassociatedWorkspaces.slice().sort((a, b) => {
+    const aHasCleanup = a.pendingCleanup && a.pendingCleanup.urls && a.pendingCleanup.urls.length > 0;
+    const bHasCleanup = b.pendingCleanup && b.pendingCleanup.urls && b.pendingCleanup.urls.length > 0;
+    return (bHasCleanup ? 1 : 0) - (aHasCleanup ? 1 : 0);
+  });
+
   let bestMatch = null;
   let bestScore = 0;
 
-  for (const ws of data.workspaces) {
-    if (ws.windowId) continue;
-
-    const wsUrls = ws.tabs.map(t => normalizeUrl(t.url)).filter(Boolean);
+  for (const ws of sortedWorkspaces) {
+    let wsUrls = ws.tabs.map(t => normalizeUrl(t.url)).filter(Boolean);
+    // 若工作区有待清理 URL，纳入匹配以帮助识别原窗口
+    if (ws.pendingCleanup && ws.pendingCleanup.urls && ws.pendingCleanup.urls.length > 0) {
+      const cleanupUrls = ws.pendingCleanup.urls.map(u => normalizeUrl(u)).filter(Boolean);
+      wsUrls = wsUrls.concat(cleanupUrls);
+    }
     if (wsUrls.length === 0) continue;
 
     const matched = windowUrls.filter(url => wsUrls.includes(url)).length;
@@ -202,14 +225,19 @@ async function scanOpenWindowsAndAssociate() {
     let associatedCount = 0;
     const matchedWindowIds = new Set();
 
-    for (const ws of unassociatedWorkspaces) {
+    // 第一轮：优先处理有待清理 URL 的工作区（标签页移出后的原工作区），
+    // 使用当前标签页 + 待清理 URL 进行匹配，避免目标工作区抢占原窗口。
+    const workspacesWithCleanup = unassociatedWorkspaces.filter(ws =>
+      ws.pendingCleanup && ws.pendingCleanup.urls && ws.pendingCleanup.urls.length > 0
+    );
+    for (const ws of workspacesWithCleanup) {
       let bestMatch = null;
       let bestScore = 0;
 
       for (const chromeWindow of normalWindows) {
         if (matchedWindowIds.has(chromeWindow.id)) continue;
 
-        const score = calculateWindowMatchScore(chromeWindow, ws);
+        const score = calculateWindowMatchScore(chromeWindow, ws, true);
         if (score > bestScore) {
           bestScore = score;
           bestMatch = chromeWindow;
@@ -224,7 +252,32 @@ async function scanOpenWindowsAndAssociate() {
       }
     }
 
-    // 第二轮 fallback：对于仍有待执行操作且未关联的工作区，
+    // 第二轮：处理普通工作区，仅使用当前标签页 URL 匹配。
+    for (const ws of unassociatedWorkspaces) {
+      if (ws.windowId || matchedWindowIds.has(ws.windowId)) continue;
+
+      let bestMatch = null;
+      let bestScore = 0;
+
+      for (const chromeWindow of normalWindows) {
+        if (matchedWindowIds.has(chromeWindow.id)) continue;
+
+        const score = calculateWindowMatchScore(chromeWindow, ws, false);
+        if (score > bestScore) {
+          bestScore = score;
+          bestMatch = chromeWindow;
+        }
+      }
+
+      if (bestMatch && bestScore >= WINDOW_MATCH_THRESHOLD) {
+        associateWindowWithWorkspaceInternal(bestMatch, ws);
+        ws.updatedAt = nowIso();
+        matchedWindowIds.add(bestMatch.id);
+        associatedCount++;
+      }
+    }
+
+    // 第三轮 fallback：对于仍有待执行操作且未关联的工作区，
     // 允许与剩余未匹配窗口关联，确保延迟操作有机会执行。
     // 为防止把无关窗口误识别为目标工作区，仅当匹配度大于 0，
     // 或窗口包含该工作区待清理 URL 时，才建立关联。
@@ -238,7 +291,7 @@ async function scanOpenWindowsAndAssociate() {
       for (const chromeWindow of normalWindows) {
         if (matchedWindowIds.has(chromeWindow.id)) continue;
 
-        const score = calculateWindowMatchScore(chromeWindow, ws);
+        const score = calculateWindowMatchScore(chromeWindow, ws, true);
         if (score > bestScore) {
           bestScore = score;
           bestMatch = chromeWindow;
@@ -1084,14 +1137,21 @@ async function syncWorkspaceFromWindow(workspaceId) {
  * @returns {Promise<boolean>} 是否同步成功
  */
 async function syncWorkspaceToWindow(workspaceId) {
-  const data = await loadWorkspaces();
-  const ws = data.workspaces.find(w => w.id === workspaceId);
-  if (!ws || !ws.windowId) {
-    console.warn('[Edge Workspace Manager] 工作区未关联窗口，无法反向同步');
+  // 防止多个流程同时反向同步同一个工作区，避免重复创建标签页
+  if (syncWorkspaceLocks.has(workspaceId)) {
+    console.log(`[Edge Workspace Manager] 工作区 ${workspaceId} 反向同步已在进行中，跳过本次调用`);
     return false;
   }
+  syncWorkspaceLocks.add(workspaceId);
 
   try {
+    const data = await loadWorkspaces();
+    const ws = data.workspaces.find(w => w.id === workspaceId);
+    if (!ws || !ws.windowId) {
+      console.warn('[Edge Workspace Manager] 工作区未关联窗口，无法反向同步');
+      return false;
+    }
+
     const chromeWindow = await chrome.windows.get(ws.windowId, { populate: true });
     if (!chromeWindow || !chromeWindow.tabs) {
       ws.windowId = null;
@@ -1101,27 +1161,40 @@ async function syncWorkspaceToWindow(workspaceId) {
       return false;
     }
 
-    // 按规范化 URL 建立真实标签页索引
+    // 按规范化 URL 建立真实标签页索引，每个 URL 可能对应多个真实标签页
     const realTabsByUrl = new Map();
     chromeWindow.tabs.forEach(tab => {
       const key = normalizeUrl(tab.url);
-      if (key) realTabsByUrl.set(key, tab);
+      if (key) {
+        if (!realTabsByUrl.has(key)) {
+          realTabsByUrl.set(key, []);
+        }
+        realTabsByUrl.get(key).push(tab);
+      }
     });
 
     const updatedTabs = [];
 
     // 确保工作区中的每个标签页都存在于真实窗口
+    console.log('[TEST_DEBUG] syncWorkspaceToWindow start', workspaceId, 'windowId', ws.windowId, 'realTabs', chromeWindow.tabs.map(t => t.url), 'wsTabs', ws.tabs.map(t => ({ url: t.url, realTabId: t.realTabId })));
     for (const wsTab of ws.tabs) {
       const key = normalizeUrl(wsTab.url);
-      if (key && realTabsByUrl.has(key)) {
-        const realTab = realTabsByUrl.get(key);
+      console.log('[TEST_DEBUG] syncWorkspaceToWindow processing', wsTab.url, 'key', key, 'realTabsByUrl count', realTabsByUrl.has(key) ? realTabsByUrl.get(key).length : 0);
+      if (key && realTabsByUrl.has(key) && realTabsByUrl.get(key).length > 0) {
+        // 取出一个同 URL 的真实标签页进行复用
+        const realTabs = realTabsByUrl.get(key);
+        const realTab = realTabs.shift();
         wsTab.realTabId = realTab.id;
         wsTab.title = realTab.title || wsTab.title;
         wsTab.favIconUrl = realTab.favIconUrl || wsTab.favIconUrl;
         updatedTabs.push(wsTab);
-        realTabsByUrl.delete(key);
+        console.log('[TEST_DEBUG] syncWorkspaceToWindow reuse realTab', realTab.id, realTab.url, 'for', wsTab.url);
+        if (realTabs.length === 0) {
+          realTabsByUrl.delete(key);
+        }
       } else {
         // 在真实窗口中创建缺失标签页
+        console.log('[TEST_DEBUG] syncWorkspaceToWindow create tab', wsTab.url, 'in window', ws.windowId);
         const newTab = await chrome.tabs.create({
           windowId: ws.windowId,
           url: wsTab.url,
@@ -1129,13 +1202,16 @@ async function syncWorkspaceToWindow(workspaceId) {
         });
         wsTab.realTabId = newTab.id;
         updatedTabs.push(wsTab);
+        console.log('[TEST_DEBUG] syncWorkspaceToWindow created tab', newTab.id, newTab.url, 'in window', newTab.windowId);
       }
     }
 
     // 关闭真实窗口中不在工作区内的普通标签页（保留新标签页等空白页）
-    for (const [url, realTab] of realTabsByUrl) {
-      if (realTab.url && realTab.url !== 'edge://newtab/' && realTab.url !== 'about:blank' && !realTab.url.startsWith('chrome://newtab')) {
-        await chrome.tabs.remove(realTab.id);
+    for (const [url, realTabs] of realTabsByUrl) {
+      for (const realTab of realTabs) {
+        if (realTab.url && realTab.url !== 'edge://newtab/' && realTab.url !== 'about:blank' && !realTab.url.startsWith('chrome://newtab')) {
+          await chrome.tabs.remove(realTab.id);
+        }
       }
     }
 
@@ -1153,6 +1229,8 @@ async function syncWorkspaceToWindow(workspaceId) {
   } catch (error) {
     console.error('[Edge Workspace Manager] 反向同步工作区失败:', error);
     return false;
+  } finally {
+    syncWorkspaceLocks.delete(workspaceId);
   }
 }
 
@@ -1432,6 +1510,42 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
           storedTab.url = tab.url;
           changed = true;
         }
+      } else {
+        // 未找到已记录的真实标签页，可能是同步期间创建的标签页尚未设置 realTabId，
+        // 或是用户新建标签页后首次完成加载。尝试按 URL 补录，避免重复创建。
+        const normalizedUrl = normalizeUrl(tab.url);
+        const matchingUrlTab = normalizedUrl
+          ? ws.tabs.find(t => !t.realTabId && normalizeUrl(t.url) === normalizedUrl)
+          : null;
+        if (matchingUrlTab) {
+          matchingUrlTab.realTabId = tab.id;
+          matchingUrlTab.title = tab.title || matchingUrlTab.title;
+          matchingUrlTab.favIconUrl = tab.favIconUrl || matchingUrlTab.favIconUrl;
+          matchingUrlTab.url = tab.url || matchingUrlTab.url;
+          matchingUrlTab.updatedAt = nowIso();
+          ws.updatedAt = nowIso();
+          changed = true;
+        } else if (tab.url && normalizedUrl) {
+          // 确为新增标签页，补充到影子数据库
+          let hostname = '';
+          try {
+            hostname = new URL(tab.url).hostname;
+          } catch (error) {
+            // 忽略无效 URL
+          }
+          ws.tabs.push({
+            id: generateId('tab'),
+            url: tab.url,
+            title: tab.title || tab.url || '新标签页',
+            favIconUrl: tab.favIconUrl || (hostname ? `https://www.google.com/s2/favicons?domain=${hostname}` : null),
+            groupId: null,
+            pinned: tab.pinned || false,
+            realTabId: tab.id,
+            createdAt: nowIso()
+          });
+          ws.updatedAt = nowIso();
+          changed = true;
+        }
       }
     }
 
@@ -1455,15 +1569,31 @@ chrome.tabs.onCreated.addListener(async (tab) => {
     const ws = data.workspaces.find(w => w.windowId === tab.windowId);
     if (!ws) return;
 
-    // 去重：若影子数据库中已存在相同真实标签页 ID 或相同 URL，
-    // 则不再追加。这能避免 syncWorkspaceToWindow 主动创建标签页后，
-    // onCreated 事件又向影子数据库写入重复数据。
+    // 去重：若影子数据库中已存在相同真实标签页 ID，则不再追加。
+    const existingById = ws.tabs.find(t => t.realTabId === tab.id);
+    if (existingById) {
+      return;
+    }
+
+    // 若标签页刚创建且 URL 尚未确定（例如通过 chrome.tabs.create 创建但尚未加载），
+    // 不立即写入影子数据库，避免与 syncWorkspaceToWindow 创建的标签页产生重复。
+    // 后续由 tabs.onUpdated 在页面加载完成后再补充。
     const normalizedNewUrl = normalizeUrl(tab.url);
-    const existingTab = ws.tabs.find(t =>
-      t.realTabId === tab.id ||
-      (normalizedNewUrl && normalizeUrl(t.url) === normalizedNewUrl)
-    );
-    if (existingTab) {
+    if (!normalizedNewUrl) {
+      console.log(`[Edge Workspace Manager] 标签页 ${tab.id} 创建时 URL 未就绪，延迟处理`);
+      return;
+    }
+
+    // 若存在相同 URL 但尚未记录真实标签页 ID 的影子标签页，
+    // 则把该真实标签页 ID 补录进去，避免 syncWorkspaceToWindow 再次创建。
+    const matchingUrlTab = ws.tabs.find(t => !t.realTabId && normalizeUrl(t.url) === normalizedNewUrl);
+    if (matchingUrlTab) {
+      matchingUrlTab.realTabId = tab.id;
+      matchingUrlTab.title = tab.title || matchingUrlTab.title;
+      matchingUrlTab.favIconUrl = tab.favIconUrl || matchingUrlTab.favIconUrl;
+      matchingUrlTab.updatedAt = nowIso();
+      ws.updatedAt = nowIso();
+      await saveWorkspaces(data);
       return;
     }
 

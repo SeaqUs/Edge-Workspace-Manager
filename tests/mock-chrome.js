@@ -15,6 +15,50 @@
   const windows = new Map();
   let initialWindowsCreated = false;
 
+  // 事件监听器集合，用于模拟 Chrome 扩展事件
+  const tabsOnCreatedListeners = [];
+  const tabsOnUpdatedListeners = [];
+  const windowsOnCreatedListeners = [];
+
+  /**
+   * 触发 tabs.onCreated 事件
+   */
+  function fireTabsOnCreated(tab) {
+    tabsOnCreatedListeners.forEach(listener => {
+      try {
+        listener({ ...tab });
+      } catch (e) {
+        console.error('[mock-chrome] tabs.onCreated listener error:', e);
+      }
+    });
+  }
+
+  /**
+   * 触发 tabs.onUpdated 事件（status=complete）
+   */
+  function fireTabsOnUpdated(tab) {
+    tabsOnUpdatedListeners.forEach(listener => {
+      try {
+        listener(tab.id, { status: 'complete' }, { ...tab });
+      } catch (e) {
+        console.error('[mock-chrome] tabs.onUpdated listener error:', e);
+      }
+    });
+  }
+
+  /**
+   * 触发 windows.onCreated 事件
+   */
+  function fireWindowsOnCreated(win) {
+    windowsOnCreatedListeners.forEach(listener => {
+      try {
+        listener({ ...win });
+      } catch (e) {
+        console.error('[mock-chrome] windows.onCreated listener error:', e);
+      }
+    });
+  }
+
   /**
    * 创建初始模拟窗口，仅执行一次
    * 包含两个 normal 窗口和一个 popup 窗口
@@ -117,6 +161,9 @@
     runtime: {
       getURL(path) {
         return `http://localhost:8765/${path}`;
+      },
+      onMessage: {
+        addListener() {}
       }
     },
 
@@ -139,6 +186,8 @@
           type: 'normal'
         };
         windows.set(windowId, win);
+        // 模拟真实浏览器窗口创建事件
+        setTimeout(() => fireWindowsOnCreated(win), 0);
         return Promise.resolve(win);
       },
 
@@ -171,6 +220,18 @@
         ensureInitialWindows();
         const allWindows = Array.from(windows.values());
         return Promise.resolve(JSON.parse(JSON.stringify(allWindows)));
+      },
+
+      onCreated: {
+        addListener(listener) {
+          windowsOnCreatedListeners.push(listener);
+        }
+      },
+      onRemoved: {
+        addListener() {}
+      },
+      onFocusChanged: {
+        addListener() {}
       }
     },
 
@@ -188,6 +249,12 @@
           favIconUrl: null
         };
         if (win) win.tabs.push(tab);
+        // 模拟真实浏览器：创建标签页后触发 onCreated，随后页面加载完成触发 onUpdated
+        setTimeout(() => fireTabsOnCreated(tab), 0);
+        setTimeout(() => {
+          tab.title = options.url;
+          fireTabsOnUpdated(tab);
+        }, 10);
         return Promise.resolve(tab);
       },
 
@@ -206,6 +273,20 @@
           }
         }
         return Promise.resolve();
+      },
+
+      onCreated: {
+        addListener(listener) {
+          tabsOnCreatedListeners.push(listener);
+        }
+      },
+      onUpdated: {
+        addListener(listener) {
+          tabsOnUpdatedListeners.push(listener);
+        }
+      },
+      onRemoved: {
+        addListener() {}
       }
     }
   };
