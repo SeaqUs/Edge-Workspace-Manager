@@ -426,3 +426,31 @@ body {
 .workspace-actions .btn-sync:hover {
   background-color: #c8e6c9;
 }
+
+/* 拖拽排序相关样式 */
+.tab-item {
+  cursor: grab;
+}
+
+.tab-item.dragging {
+  opacity: 0.5;
+  cursor: grabbing;
+}
+
+.tab-list {
+  min-height: 8px;
+}
+
+.drop-indicator {
+  height: 2px;
+  background-color: var(--primary-color);
+  margin: 4px 0;
+  border-radius: 1px;
+  pointer-events: none;
+}
+
+.workspace-card.drag-over {
+  outline: 2px dashed var(--primary-color);
+  outline-offset: -2px;
+  background-color: #f0f7ff;
+}

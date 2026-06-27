@@ -130,8 +130,38 @@
     assert(syncedWs.tabs.length === originalTabCount + 1, '同步后标签页数量增加 1');
     assert(syncedWs.tabs.some(t => t.url === 'https://sync-test.com'), '同步后包含新增标签页');
 
+    // 测试 15：工作区内标签页拖拽排序
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    const orderWs = await createWorkspace('排序测试');
+    const tabA = await addTabToWorkspace(orderWs.id, 'https://a.com', 'A');
+    const tabB = await addTabToWorkspace(orderWs.id, 'https://b.com', 'B');
+    const tabC = await addTabToWorkspace(orderWs.id, 'https://c.com', 'C');
+
+    const reordered = await reorderTab(orderWs.id, tabC.id, 0);
+    assert(reordered === true, 'reorderTab 返回成功');
+    const dataAfterReorder = await loadWorkspaces();
+    const reorderedWs = dataAfterReorder.workspaces.find(w => w.id === orderWs.id);
+    assert(reorderedWs.tabs[0].id === tabC.id, '标签页 C 移动到第一位');
+    assert(reorderedWs.tabs[1].id === tabA.id, '标签页 A 移动到第二位');
+    assert(reorderedWs.tabs[2].id === tabB.id, '标签页 B 移动到第三位');
+
+    // 测试 16：跨工作区移动标签页
+    const sourceWs = await createWorkspace('源工作区');
+    const targetWs = await createWorkspace('目标工作区');
+    const moveTab = await addTabToWorkspace(sourceWs.id, 'https://move-test.com', 'Move Tab');
+
+    const moved = await moveTabToWorkspace(moveTab.id, sourceWs.id, targetWs.id);
+    assert(moved === true, 'moveTabToWorkspace 返回成功');
+    const dataAfterMove = await loadWorkspaces();
+    const sourceAfterMove = dataAfterMove.workspaces.find(w => w.id === sourceWs.id);
+    const targetAfterMove = dataAfterMove.workspaces.find(w => w.id === targetWs.id);
+    assert(sourceAfterMove.tabs.length === 0, '源工作区标签页已移除');
+    assert(targetAfterMove.tabs.length === 1, '目标工作区标签页已增加');
+    assert(targetAfterMove.tabs[0].id === moveTab.id, '移动的标签页 ID 一致');
+    assert(targetAfterMove.tabs[0].groupId === null, '跨区移动后分组关联已清除');
+
     const finalData = await loadWorkspaces();
-    assert(finalData.workspaces.length === 1, '最终存在 1 个工作区');
+    assert(finalData.workspaces.length === 3, '最终存在 3 个工作区（排序测试 + 源 + 目标）');
 
     // 输出汇总
     summaryEl.textContent = `测试完成：通过 ${passCount} 项，失败 ${failCount} 项`;

@@ -238,6 +238,16 @@ async function handleMessage(request, sender, sendResponse) {
         break;
       }
 
+      case 'REORDER_TAB': {
+        const ok = await reorderTab(
+          request.workspaceId,
+          request.tabId,
+          request.targetIndex
+        );
+        sendResponse({ success: ok });
+        break;
+      }
+
       case 'CREATE_GROUP': {
         const group = await createGroup(request.workspaceId, request.groupName, request.parentGroupId);
         sendResponse({ success: !!group, group });
@@ -288,3 +298,22 @@ async function handleMessage(request, sender, sendResponse) {
     sendResponse({ success: false, error: error.message });
   }
 }
+
+/**
+ * 点击扩展图标时，在独立窗口中打开管理面板
+ * 使用新窗口替代默认 popup，以获得更大操作空间
+ */
+chrome.action.onClicked.addListener(async () => {
+  try {
+    const panelUrl = chrome.runtime.getURL('popup.html');
+    await chrome.windows.create({
+      url: panelUrl,
+      type: 'normal',
+      width: 900,
+      height: 700,
+      focused: true
+    });
+  } catch (error) {
+    console.error('[Edge Workspace Manager] 打开管理窗口失败:', error);
+  }
+});

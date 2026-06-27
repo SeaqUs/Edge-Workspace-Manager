@@ -276,6 +276,11 @@
     card.className = 'workspace-card';
     card.dataset.workspaceId = ws.id;
 
+    // 工作区卡片作为跨工作区拖拽放置目标
+    card.addEventListener('dragover', handleWorkspaceDragOver);
+    card.addEventListener('dragleave', handleWorkspaceDragLeave);
+    card.addEventListener('drop', handleWorkspaceDrop);
+
     // 头部：名称与操作按钮
     const header = document.createElement('div');
     header.className = 'workspace-header';
@@ -334,6 +339,12 @@
     // 标签页列表
     const tabList = document.createElement('div');
     tabList.className = 'tab-list';
+    tabList.dataset.workspaceId = ws.id;
+
+    // 标签页列表支持同工作区内拖拽排序
+    tabList.addEventListener('dragover', handleTabListDragOver);
+    tabList.addEventListener('dragleave', handleTabListDragLeave);
+    tabList.addEventListener('drop', handleTabListDrop);
 
     if (ws.tabs && ws.tabs.length > 0) {
       ws.tabs.forEach((tab) => {
@@ -452,6 +463,13 @@
   function buildTabItem(ws, tab) {
     const item = document.createElement('div');
     item.className = 'tab-item';
+    item.draggable = true;
+    item.dataset.tabId = tab.id;
+    item.dataset.workspaceId = ws.id;
+
+    // 拖拽事件绑定
+    item.addEventListener('dragstart', handleTabDragStart);
+    item.addEventListener('dragend', handleTabDragEnd);
 
     const favicon = document.createElement('img');
     favicon.className = 'tab-favicon';
@@ -703,6 +721,208 @@
       }
     } catch (error) {
       showError(`同步失败: ${error.message}`);
+    }
+  }
+
+  // ==================== 拖拽排序与跨区移动 ====================
+
+  // 当前正在拖拽的标签页信息
+  let draggedTabInfo = null;
+
+  /**
+   * 标签页拖拽开始
+   */
+  function handleTabDragStart(event) {
+    const item = event.currentTarget;
+    draggedTabInfo = {
+      tabId: item.dataset.tabId,
+      workspaceId: item.dataset.workspaceId
+    };
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', JSON.stringify(draggedTabInfo));
+    item.classList.add('dragging');
+  }
+
+  /**
+   * 标签页拖拽结束
+   */
+  function handleTabDragEnd(event) {
+    const item = event.currentTarget;
+    item.classList.remove('dragging');
+    draggedTabInfo = null;
+    clearDropIndicators();
+  }
+
+  /**
+   * 清除所有拖拽指示线
+   */
+  function clearDropIndicators() {
+    document.querySelectorAll('.drop-indicator').forEach(el => el.remove());
+    document.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
+  }
+
+  /**
+   * 在工作区内标签页列表上方拖拽时，计算插入位置并显示指示线
+   */
+  function handleTabListDragOver(event) {
+    event.preventDefault();
+    if (!draggedTabInfo) return;
+
+    const tabList = event.currentTarget;
+    const targetWorkspaceId = tabList.dataset.workspaceId;
+
+    // 仅允许在同工作区内排序
+    if (targetWorkspaceId !== draggedTabInfo.workspaceId) return;
+
+    const afterElement = getDragAfterElement(tabList, event.clientY);
+    const indicator = getOrCreateDropIndicator();
+
+    if (afterElement) {
+      tabList.insertBefore(indicator, afterElement);
+    } else {
+      tabList.appendChild(indicator);
+    }
+  }
+
+  /**
+   * 获取拖拽后应插入位置的下一个元素
+   */
+  function getDragAfterElement(container, y) {
+    const draggableElements = [...container.querySelectorAll('.tab-item:not(.dragging)')];
+
+    return draggableElements.reduce((closest, child) => {
+      const box = child.getBoundingClientRect();
+      const offset = y - box.top - box.height / 2;
+      if (offset < 0 && offset > closest.offset) {
+        return { offset: offset, element: child };
+      }
+      return closest;
+    }, { offset: Number.NEGATIVE_INFINITY }).element;
+  }
+
+  /**
+   * 获取或创建拖拽指示线元素
+   */
+  function getOrCreateDropIndicator() {
+    let indicator = document.querySelector('.drop-indicator');
+    if (!indicator) {
+      indicator = document.createElement('div');
+      indicator.className = 'drop-indicator';
+    }
+    return indicator;
+  }
+
+  /**
+   * 标签页列表拖拽离开
+   */
+  function handleTabListDragLeave(event) {
+    // 当离开列表区域时清除指示线，但进入子元素不处理
+    const tabList = event.currentTarget;
+    if (!tabList.contains(event.relatedTarget)) {
+      clearDropIndicators();
+    }
+  }
+
+  /**
+   * 在工作区内标签页列表上释放：执行排序
+   */
+  async function handleTabListDrop(event) {
+    event.preventDefault();
+    if (!draggedTabInfo) return;
+
+    const tabList = event.currentTarget;
+    const targetWorkspaceId = tabList.dataset.workspaceId;
+
+    // 仅处理同工作区排序
+    if (targetWorkspaceId !== draggedTabInfo.workspaceId) return;
+
+    const afterElement = getDragAfterElement(tabList, event.clientY);
+    const children = [...tabList.querySelectorAll('.tab-item')];
+    let targetIndex = children.length;
+
+    if (afterElement) {
+      targetIndex = children.indexOf(afterElement);
+    }
+
+    clearDropIndicators();
+
+    try {
+      const response = await sendMessage({
+        type: 'REORDER_TAB',
+        workspaceId: targetWorkspaceId,
+        tabId: draggedTabInfo.tabId,
+        targetIndex
+      });
+      if (response && response.success) {
+        await loadAndRender();
+      } else {
+        showError(response && response.error ? response.error : '排序失败');
+      }
+    } catch (error) {
+      showError(`排序失败: ${error.message}`);
+    }
+  }
+
+  /**
+   * 拖拽经过工作区卡片：高亮放置目标
+   */
+  function handleWorkspaceDragOver(event) {
+    event.preventDefault();
+    if (!draggedTabInfo) return;
+
+    const card = event.currentTarget;
+    const targetWorkspaceId = card.dataset.workspaceId;
+
+    // 不允许拖到自己所在的工作区
+    if (targetWorkspaceId === draggedTabInfo.workspaceId) return;
+
+    card.classList.add('drag-over');
+    event.dataTransfer.dropEffect = 'move';
+  }
+
+  /**
+   * 拖拽离开工作区卡片
+   */
+  function handleWorkspaceDragLeave(event) {
+    const card = event.currentTarget;
+    if (!card.contains(event.relatedTarget)) {
+      card.classList.remove('drag-over');
+    }
+  }
+
+  /**
+   * 在工作区卡片上释放：执行跨工作区移动
+   */
+  async function handleWorkspaceDrop(event) {
+    event.preventDefault();
+    if (!draggedTabInfo) return;
+
+    const card = event.currentTarget;
+    const targetWorkspaceId = card.dataset.workspaceId;
+
+    // 同工作区已由标签页列表处理
+    if (targetWorkspaceId === draggedTabInfo.workspaceId) {
+      card.classList.remove('drag-over');
+      return;
+    }
+
+    card.classList.remove('drag-over');
+    clearDropIndicators();
+
+    try {
+      const response = await sendMessage({
+        type: 'MOVE_TAB',
+        tabId: draggedTabInfo.tabId,
+        sourceWorkspaceId: draggedTabInfo.workspaceId,
+        targetWorkspaceId
+      });
+      if (response && response.success) {
+        await loadAndRender();
+      } else {
+        showError(response && response.error ? response.error : '移动标签页失败');
+      }
+    } catch (error) {
+      showError(`移动标签页失败: ${error.message}`);
     }
   }
 

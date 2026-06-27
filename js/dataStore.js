@@ -253,6 +253,33 @@ async function moveTabToWorkspace(tabId, sourceWorkspaceId, targetWorkspaceId) {
 }
 
 /**
+ * 调整标签页在工作区内的顺序
+ * @param {string} workspaceId - 工作区 ID
+ * @param {string} tabId - 标签页内部 ID
+ * @param {number} targetIndex - 目标位置索引
+ * @returns {Promise<boolean>} 是否排序成功
+ */
+async function reorderTab(workspaceId, tabId, targetIndex) {
+  const data = await loadWorkspaces();
+  const ws = data.workspaces.find(w => w.id === workspaceId);
+  if (!ws || !ws.tabs) return false;
+
+  const currentIndex = ws.tabs.findIndex(t => t.id === tabId);
+  if (currentIndex === -1) return false;
+
+  // 限制目标索引范围
+  const safeIndex = Math.max(0, Math.min(targetIndex, ws.tabs.length - 1));
+  if (currentIndex === safeIndex) return true;
+
+  const [movedTab] = ws.tabs.splice(currentIndex, 1);
+  ws.tabs.splice(safeIndex, 0, movedTab);
+  ws.updatedAt = nowIso();
+
+  await saveWorkspaces(data);
+  return true;
+}
+
+/**
  * 为工作区创建分组
  * @param {string} workspaceId - 工作区 ID
  * @param {string} groupName - 分组名称
@@ -642,6 +669,7 @@ if (typeof module !== 'undefined' && module.exports) {
     addTabToWorkspace,
     removeTabFromWorkspace,
     moveTabToWorkspace,
+    reorderTab,
     createGroup,
     assignTabToGroup,
     openWorkspace,
