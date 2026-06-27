@@ -36,6 +36,8 @@
   let workspaceData = { workspaces: [] };
   // 当前可导入窗口缓存
   let importableWindows = [];
+  // 存在待执行操作的工作区 ID 集合
+  let pendingWorkspaceIds = new Set();
 
   /**
    * 页面加载完成后初始化
@@ -266,14 +268,19 @@
    */
   async function loadAndRender() {
     try {
-      const response = await sendMessage({ type: 'GET_WORKSPACES' });
-      if (response && response.success) {
-        workspaceData = response.data;
+      const [workspacesResponse, pendingResponse] = await Promise.all([
+        sendMessage({ type: 'GET_WORKSPACES' }),
+        sendMessage({ type: 'GET_ALL_PENDING_WORKSPACE_IDS' })
+      ]);
+
+      if (workspacesResponse && workspacesResponse.success) {
+        workspaceData = workspacesResponse.data;
+        pendingWorkspaceIds = new Set((pendingResponse && pendingResponse.success ? pendingResponse.workspaceIds : []) || []);
         renderWorkspaceList();
         updateSidebarStats();
         hideError();
       } else {
-        showError(response && response.error ? response.error : '加载数据失败');
+        showError(workspacesResponse && workspacesResponse.error ? workspacesResponse.error : '加载数据失败');
       }
     } catch (error) {
       showError(`加载数据失败: ${error.message}`);
@@ -318,8 +325,9 @@
    * @returns {HTMLElement} 卡片根元素
    */
   function buildWorkspaceCard(ws) {
+    const isPending = pendingWorkspaceIds.has(ws.id);
     const card = document.createElement('div');
-    card.className = 'workspace-card';
+    card.className = `workspace-card${isPending ? ' pending' : ''}`;
     card.dataset.workspaceId = ws.id;
 
     // 工作区卡片作为跨工作区拖拽放置目标
@@ -342,8 +350,13 @@
     nameEl.addEventListener('click', () => toggleWorkspace(ws.id));
 
     const statusEl = document.createElement('span');
-    statusEl.className = `workspace-status ${ws.windowId ? 'open' : 'closed'}`;
-    statusEl.innerHTML = `<span class="status-dot"></span>${ws.windowId ? '已打开' : '未打开'}`;
+    if (isPending) {
+      statusEl.className = 'workspace-status pending';
+      statusEl.innerHTML = '<span class="status-dot"></span>等待原生工作区';
+    } else {
+      statusEl.className = `workspace-status ${ws.windowId ? 'open' : 'closed'}`;
+      statusEl.innerHTML = `<span class="status-dot"></span>${ws.windowId ? '已打开' : '未打开'}`;
+    }
 
     titleEl.appendChild(nameEl);
     titleEl.appendChild(statusEl);
@@ -351,16 +364,33 @@
     const actionsEl = document.createElement('div');
     actionsEl.className = 'workspace-actions';
 
-    const openBtn = document.createElement('button');
-    openBtn.className = 'btn btn-small btn-secondary';
-    openBtn.type = 'button';
-    openBtn.textContent = ws.windowId ? '关闭' : '打开';
-    openBtn.title = ws.windowId ? '关闭该窗口' : '用标签页创建新窗口';
-    openBtn.addEventListener('click', () => toggleWorkspace(ws.id));
-    actionsEl.appendChild(openBtn);
+    if (isPending) {
+      // 等待原生工作区打开中：允许立即强制创建窗口或取消等待
+      const forceCreateBtn = document.createElement('button');
+      forceCreateBtn.className = 'btn btn-small btn-secondary';
+      forceCreateBtn.type = 'button';
+      forceCreateBtn.textContent = '立即创建';
+      forceCreateBtn.title = '不等原生工作区，直接创建新窗口打开';
+      forceCreateBtn.addEventListener('click', () => forceCreateWorkspace(ws.id));
+      actionsEl.appendChild(forceCreateBtn);
 
-    if (ws.windowId) {
-      // 窗口已打开：显示同步按钮
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'btn btn-small btn-text';
+      cancelBtn.type = 'button';
+      cancelBtn.textContent = '取消等待';
+      cancelBtn.title = '取消待执行的打开操作';
+      cancelBtn.addEventListener('click', () => cancelPendingOperations(ws.id));
+      actionsEl.appendChild(cancelBtn);
+    } else if (ws.windowId) {
+      // 窗口已打开：显示关闭与同步按钮
+      const closeBtn = document.createElement('button');
+      closeBtn.className = 'btn btn-small btn-secondary';
+      closeBtn.type = 'button';
+      closeBtn.textContent = '关闭';
+      closeBtn.title = '关闭该窗口';
+      closeBtn.addEventListener('click', () => toggleWorkspace(ws.id));
+      actionsEl.appendChild(closeBtn);
+
       const syncBtn = document.createElement('button');
       syncBtn.className = 'btn btn-small btn-secondary';
       syncBtn.type = 'button';
@@ -369,7 +399,15 @@
       syncBtn.addEventListener('click', () => syncWorkspace(ws.id));
       actionsEl.appendChild(syncBtn);
     } else {
-      // 窗口未打开：显示关联当前窗口按钮
+      // 窗口未打开：显示打开与关联当前窗口按钮
+      const openBtn = document.createElement('button');
+      openBtn.className = 'btn btn-small btn-secondary';
+      openBtn.type = 'button';
+      openBtn.textContent = '打开';
+      openBtn.title = '等待对应的 Edge 原生工作区窗口打开后自动同步';
+      openBtn.addEventListener('click', () => toggleWorkspace(ws.id));
+      actionsEl.appendChild(openBtn);
+
       const associateBtn = document.createElement('button');
       associateBtn.className = 'btn btn-small btn-secondary';
       associateBtn.type = 'button';
@@ -622,12 +660,49 @@
       const messageType = ws && ws.windowId ? 'CLOSE_WORKSPACE' : 'OPEN_WORKSPACE';
       const response = await sendMessage({ type: messageType, workspaceId });
       if (response && response.success) {
+        if (messageType === 'OPEN_WORKSPACE' && response.pending) {
+          showError('已加入等待队列，请在 Edge 中打开对应原生工作区，扩展将自动同步标签页。');
+        }
         await loadAndRender();
       } else {
         showError(response && response.error ? response.error : '操作失败');
       }
     } catch (error) {
       showError(`操作工作区失败: ${error.message}`);
+    }
+  }
+
+  /**
+   * 不等原生工作区，直接强制创建新窗口打开工作区
+   * @param {string} workspaceId - 工作区 ID
+   */
+  async function forceCreateWorkspace(workspaceId) {
+    try {
+      const response = await sendMessage({ type: 'FORCE_CREATE_WORKSPACE_WINDOW', workspaceId });
+      if (response && response.success) {
+        await loadAndRender();
+      } else {
+        showError(response && response.error ? response.error : '强制创建窗口失败');
+      }
+    } catch (error) {
+      showError(`强制创建窗口失败: ${error.message}`);
+    }
+  }
+
+  /**
+   * 取消指定工作区的待执行操作
+   * @param {string} workspaceId - 工作区 ID
+   */
+  async function cancelPendingOperations(workspaceId) {
+    try {
+      const response = await sendMessage({ type: 'CLEAR_PENDING_OPERATIONS', workspaceId });
+      if (response && response.success) {
+        await loadAndRender();
+      } else {
+        showError('取消等待失败');
+      }
+    } catch (error) {
+      showError(`取消等待失败: ${error.message}`);
     }
   }
 

@@ -263,6 +263,13 @@ async function handleMessage(request, sender, sendResponse) {
 
       case 'OPEN_WORKSPACE': {
         const ws = await openWorkspace(request.workspaceId);
+        const pending = ws ? await hasPendingOperations(request.workspaceId) : false;
+        sendResponse({ success: !!ws, workspace: ws, pending });
+        break;
+      }
+
+      case 'FORCE_CREATE_WORKSPACE_WINDOW': {
+        const ws = await forceCreateWorkspaceWindow(request.workspaceId);
         sendResponse({ success: !!ws, workspace: ws });
         break;
       }
@@ -270,6 +277,25 @@ async function handleMessage(request, sender, sendResponse) {
       case 'CLOSE_WORKSPACE': {
         const ok = await closeWorkspace(request.workspaceId);
         sendResponse({ success: ok });
+        break;
+      }
+
+      case 'GET_PENDING_OPERATIONS': {
+        const ops = await getPendingOperations(request.workspaceId);
+        sendResponse({ success: true, operations: ops });
+        break;
+      }
+
+      case 'GET_ALL_PENDING_WORKSPACE_IDS': {
+        const ops = await loadPendingOperations();
+        const ids = Object.keys(ops).filter(id => ops[id] && ops[id].length > 0);
+        sendResponse({ success: true, workspaceIds: ids });
+        break;
+      }
+
+      case 'CLEAR_PENDING_OPERATIONS': {
+        await clearPendingOperations(request.workspaceId);
+        sendResponse({ success: true });
         break;
       }
 

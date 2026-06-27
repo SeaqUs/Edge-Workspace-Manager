@@ -20,6 +20,9 @@ const WINDOW_MATCH_THRESHOLD = 0.5;
 // 打开工作区时复用已存在窗口的严格阈值，避免把单标签页窗口误关联到多标签页工作区
 const WINDOW_MATCH_THRESHOLD_STRICT = 0.8;
 
+// 待执行操作队列的存储键名
+const PENDING_OPS_KEY = 'pendingOperations';
+
 /**
  * 生成唯一 ID
  * @param {string} prefix - ID 前缀，例如 'ws' / 'tab' / 'group'
@@ -31,7 +34,6 @@ function generateId(prefix = 'id') {
   return `${prefix}_${timestamp}_${random}`;
 }
 
-/**
 /**
  * 获取当前 ISO 格式时间字符串
  * @returns {string} ISO 8601 时间字符串
@@ -138,6 +140,8 @@ async function tryAssociateWindowWithWorkspace(chromeWindow) {
     bestMatch.updatedAt = nowIso();
     await saveWorkspaces(data);
     console.log(`[Edge Workspace Manager] 窗口 ${chromeWindow.id} 已自动关联到工作区 ${bestMatch.id}，匹配度 ${(bestScore * 100).toFixed(0)}%`);
+    // 若此前用户通过面板触发了“打开”等操作，现在应用待执行队列
+    await applyPendingOperations(bestMatch.id);
     return true;
   }
 
@@ -187,6 +191,13 @@ async function scanOpenWindowsAndAssociate() {
 
     if (associatedCount > 0) {
       await saveWorkspaces(data);
+    }
+
+    // 保存完成后再应用待执行操作，确保 applyPendingOperations 能读到最新 windowId
+    for (const ws of unassociatedWorkspaces) {
+      if (matchedWindowIds.has(ws.windowId)) {
+        await applyPendingOperations(ws.id);
+      }
     }
 
     const unmatchedWindows = normalWindows
@@ -240,6 +251,95 @@ async function saveWorkspaces(data) {
     console.error('[Edge Workspace Manager] 保存存储失败:', error);
     throw error;
   }
+}
+
+/**
+ * 读取待执行操作队列
+ * 结构为 { [workspaceId]: [ { id, type, payload, createdAt } ] }
+ * @returns {Promise<object>}
+ */
+async function loadPendingOperations() {
+  try {
+    const result = await chrome.storage.local.get([PENDING_OPS_KEY]);
+    return result[PENDING_OPS_KEY] || {};
+  } catch (error) {
+    console.error('[Edge Workspace Manager] 读取待执行操作失败:', error);
+    return {};
+  }
+}
+
+/**
+ * 保存待执行操作队列
+ * @param {object} operations - 操作队列对象
+ * @returns {Promise<void>}
+ */
+async function savePendingOperations(operations) {
+  try {
+    await chrome.storage.local.set({ [PENDING_OPS_KEY]: operations });
+  } catch (error) {
+    console.error('[Edge Workspace Manager] 保存待执行操作失败:', error);
+    throw error;
+  }
+}
+
+/**
+ * 向指定工作区添加一条待执行操作
+ * @param {string} workspaceId - 工作区 ID
+ * @param {string} type - 操作类型，如 'OPEN' / 'SYNC'
+ * @param {object} payload - 操作附加数据
+ * @returns {Promise<object>} 新增的操作对象
+ */
+async function queuePendingOperation(workspaceId, type, payload = {}) {
+  const operations = await loadPendingOperations();
+  const workspaceOps = operations[workspaceId] || [];
+  const operation = {
+    id: generateId('op'),
+    type,
+    payload,
+    createdAt: nowIso()
+  };
+  workspaceOps.push(operation);
+  operations[workspaceId] = workspaceOps;
+  await savePendingOperations(operations);
+  console.log(`[Edge Workspace Manager] 工作区 ${workspaceId} 操作 ${type} 已入队`);
+  return operation;
+}
+
+/**
+ * 获取指定工作区的待执行操作
+ * @param {string} workspaceId - 工作区 ID
+ * @returns {Promise<object[]>}
+ */
+async function getPendingOperations(workspaceId) {
+  const operations = await loadPendingOperations();
+  return (operations[workspaceId] || []).slice();
+}
+
+/**
+ * 清空指定工作区或所有工作区的待执行操作
+ * @param {string} [workspaceId] - 工作区 ID，缺省时清空全部
+ * @returns {Promise<void>}
+ */
+async function clearPendingOperations(workspaceId) {
+  if (!workspaceId) {
+    await savePendingOperations({});
+    return;
+  }
+  const operations = await loadPendingOperations();
+  if (operations[workspaceId]) {
+    delete operations[workspaceId];
+    await savePendingOperations(operations);
+  }
+}
+
+/**
+ * 检查指定工作区是否存在待执行操作
+ * @param {string} workspaceId - 工作区 ID
+ * @returns {Promise<boolean>}
+ */
+async function hasPendingOperations(workspaceId) {
+  const operations = await loadPendingOperations();
+  return !!operations[workspaceId] && operations[workspaceId].length > 0;
 }
 
 /**
@@ -549,13 +649,41 @@ async function openWorkspace(workspaceId) {
       ws.updatedAt = nowIso();
       await saveWorkspaces(data);
       console.log(`[Edge Workspace Manager] 工作区 ${ws.id} 已关联到已存在窗口 ${bestMatch.id}，匹配度 ${(bestScore * 100).toFixed(0)}%`);
+      // 若此前存在“等待原生工作区打开”的待执行操作，现在应用
+      await applyPendingOperations(workspaceId);
       return ws;
     }
   } catch (error) {
     console.warn('[Edge Workspace Manager] 检查已存在窗口失败:', error);
   }
 
-  // 未找到匹配窗口，根据标签页 URL 列表创建新窗口
+  // 未找到匹配窗口：不创建“伪工作区”多标签窗口，
+  // 而是将打开意图入队，等检测到对应原生工作区窗口后再同步。
+  await queuePendingOperation(workspaceId, 'OPEN', { reason: 'waiting_for_native_workspace' });
+  return ws;
+}
+
+/**
+ * 强制立即创建新窗口来打开工作区
+ * 适用于用户明确需要扩展创建窗口的场景
+ * @param {string} workspaceId - 工作区 ID
+ * @returns {Promise<object|null>} 更新后的工作区对象
+ */
+async function forceCreateWorkspaceWindow(workspaceId) {
+  const data = await loadWorkspaces();
+  const ws = data.workspaces.find(w => w.id === workspaceId);
+  if (!ws) return null;
+
+  if (ws.windowId) {
+    try {
+      await chrome.windows.update(ws.windowId, { focused: true });
+      return ws;
+    } catch (error) {
+      ws.windowId = null;
+    }
+  }
+
+  // 创建新窗口
   const urls = ws.tabs.length > 0 ? ws.tabs.map(t => t.url) : ['edge://newtab/'];
   try {
     const newWindow = await chrome.windows.create({
@@ -854,6 +982,107 @@ async function syncWorkspaceFromWindow(workspaceId) {
 }
 
 /**
+ * 将工作区的影子数据同步到关联的 Edge 窗口
+ * 用于“等待原生工作区打开”场景：窗口被检测到后，自动创建缺失标签页
+ * @param {string} workspaceId - 工作区 ID
+ * @returns {Promise<boolean>} 是否同步成功
+ */
+async function syncWorkspaceToWindow(workspaceId) {
+  const data = await loadWorkspaces();
+  const ws = data.workspaces.find(w => w.id === workspaceId);
+  if (!ws || !ws.windowId) {
+    console.warn('[Edge Workspace Manager] 工作区未关联窗口，无法反向同步');
+    return false;
+  }
+
+  try {
+    const chromeWindow = await chrome.windows.get(ws.windowId, { populate: true });
+    if (!chromeWindow || !chromeWindow.tabs) {
+      ws.windowId = null;
+      ws.tabs.forEach(tab => delete tab.realTabId);
+      ws.updatedAt = nowIso();
+      await saveWorkspaces(data);
+      return false;
+    }
+
+    // 按规范化 URL 建立真实标签页索引
+    const realTabsByUrl = new Map();
+    chromeWindow.tabs.forEach(tab => {
+      const key = normalizeUrl(tab.url);
+      if (key) realTabsByUrl.set(key, tab);
+    });
+
+    const updatedTabs = [];
+
+    // 确保工作区中的每个标签页都存在于真实窗口
+    for (const wsTab of ws.tabs) {
+      const key = normalizeUrl(wsTab.url);
+      if (key && realTabsByUrl.has(key)) {
+        const realTab = realTabsByUrl.get(key);
+        wsTab.realTabId = realTab.id;
+        wsTab.title = realTab.title || wsTab.title;
+        wsTab.favIconUrl = realTab.favIconUrl || wsTab.favIconUrl;
+        updatedTabs.push(wsTab);
+        realTabsByUrl.delete(key);
+      } else {
+        // 在真实窗口中创建缺失标签页
+        const newTab = await chrome.tabs.create({
+          windowId: ws.windowId,
+          url: wsTab.url,
+          active: false
+        });
+        wsTab.realTabId = newTab.id;
+        updatedTabs.push(wsTab);
+      }
+    }
+
+    // 关闭真实窗口中不在工作区内的普通标签页（保留新标签页等空白页）
+    for (const [url, realTab] of realTabsByUrl) {
+      if (realTab.url && realTab.url !== 'edge://newtab/' && realTab.url !== 'about:blank' && !realTab.url.startsWith('chrome://newtab')) {
+        await chrome.tabs.remove(realTab.id);
+      }
+    }
+
+    ws.tabs = updatedTabs;
+    ws.updatedAt = nowIso();
+    await saveWorkspaces(data);
+    console.log(`[Edge Workspace Manager] 工作区 ${workspaceId} 的影子数据已同步到窗口 ${ws.windowId}`);
+    return true;
+  } catch (error) {
+    console.error('[Edge Workspace Manager] 反向同步工作区失败:', error);
+    return false;
+  }
+}
+
+/**
+ * 应用指定工作区的所有待执行操作
+ * 通常在窗口被关联后调用，实现延迟执行的打开/同步等意图
+ * @param {string} workspaceId - 工作区 ID
+ * @returns {Promise<boolean>} 是否成功应用
+ */
+async function applyPendingOperations(workspaceId) {
+  const operations = await getPendingOperations(workspaceId);
+  if (operations.length === 0) return true;
+
+  let success = true;
+  for (const op of operations) {
+    try {
+      if (op.type === 'OPEN' || op.type === 'SYNC') {
+        const synced = await syncWorkspaceToWindow(workspaceId);
+        if (!synced) success = false;
+      }
+      // 后续可扩展更多操作类型，如 REMOVE_TAB、REORDER 等
+    } catch (error) {
+      console.error(`[Edge Workspace Manager] 应用待执行操作 ${op.id} 失败:`, error);
+      success = false;
+    }
+  }
+
+  await clearPendingOperations(workspaceId);
+  return success;
+}
+
+/**
  * 将当前聚焦的浏览器窗口关联到指定工作区
  * 用于 Edge 原生按钮打开窗口后，手动建立扩展工作区与窗口的映射
  * @param {string} workspaceId - 工作区 ID
@@ -883,6 +1112,8 @@ async function associateCurrentWindow(workspaceId) {
     ws.updatedAt = nowIso();
     await saveWorkspaces(data);
     console.log(`[Edge Workspace Manager] 工作区 ${workspaceId} 已关联到窗口 ${currentWindow.id}`);
+    // 若此前有“等待原生工作区打开”的入队操作，立即应用
+    await applyPendingOperations(workspaceId);
     return true;
   } catch (error) {
     console.error('[Edge Workspace Manager] 关联当前窗口失败:', error);
@@ -946,12 +1177,21 @@ if (typeof module !== 'undefined' && module.exports) {
     getOpenWindows,
     importSelectedWindows,
     syncWorkspaceFromWindow,
+    syncWorkspaceToWindow,
     associateCurrentWindow,
     normalizeUrl,
     calculateWindowMatchScore,
     associateWindowWithWorkspaceInternal,
     tryAssociateWindowWithWorkspace,
     scanOpenWindowsAndAssociate,
+    applyPendingOperations,
+    queuePendingOperation,
+    getPendingOperations,
+    clearPendingOperations,
+    hasPendingOperations,
+    loadPendingOperations,
+    savePendingOperations,
+    forceCreateWorkspaceWindow,
     generateId,
     nowIso
   };

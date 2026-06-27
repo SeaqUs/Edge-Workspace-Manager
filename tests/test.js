@@ -79,9 +79,9 @@
     const unassigned = await assignTabToGroup(ws.id, tab.id, null);
     assert(unassigned === true, 'assignTabToGroup 取消分组成功');
 
-    // 测试 8：打开工作区窗口
-    const openedWs = await openWorkspace(ws.id);
-    assert(openedWs && openedWs.windowId, 'openWorkspace 创建窗口并记录 windowId');
+    // 测试 8：强制创建窗口打开工作区
+    const openedWs = await forceCreateWorkspaceWindow(ws.id);
+    assert(openedWs && openedWs.windowId, 'forceCreateWorkspaceWindow 创建窗口并记录 windowId');
     assert(openedWs.tabs.every(t => typeof t.realTabId === 'number'), '打开窗口后所有标签页记录 realTabId');
 
     // 测试 9：关闭工作区窗口
@@ -116,7 +116,7 @@
 
     // 测试 14：打开工作区后强制同步
     const syncWs = dataAfterSelected.workspaces[0];
-    const openedSyncWs = await openWorkspace(syncWs.id);
+    const openedSyncWs = await forceCreateWorkspaceWindow(syncWs.id);
     assert(openedSyncWs && openedSyncWs.windowId, '同步测试前工作区窗口已打开');
 
     // 在 mock 窗口中新增一个标签页（模拟用户在浏览器中打开新标签）
@@ -223,6 +223,61 @@
     const openedReuseWs = await openWorkspace(reuseWs.id);
     assert(openedReuseWs && openedReuseWs.windowId, 'openWorkspace 返回已关联窗口');
     assert(openedReuseWs.tabs.some(t => t.url === 'https://www.bing.com'), '复用窗口包含匹配标签页');
+
+    // 测试 22：openWorkspace 无匹配窗口时入队，不创建伪窗口
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    await clearPendingOperations(); // 清空全部待执行操作
+    const queueWs = await createWorkspace('入队测试');
+    await addTabToWorkspace(queueWs.id, 'https://unique-test.com', 'Unique');
+
+    const queuedOpen = await openWorkspace(queueWs.id);
+    assert(queuedOpen && !queuedOpen.windowId, 'openWorkspace 未创建窗口时返回无 windowId');
+    const pendingOps = await getPendingOperations(queueWs.id);
+    assert(pendingOps.length === 1 && pendingOps[0].type === 'OPEN', 'openWorkspace 已入队 OPEN 操作');
+
+    // 测试 23：syncWorkspaceToWindow 为关联窗口创建缺失标签页
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    const syncToWindowWs = await createWorkspace('反向同步测试');
+    await addTabToWorkspace(syncToWindowWs.id, 'https://github.com', 'GitHub');
+    await addTabToWorkspace(syncToWindowWs.id, 'https://new-tab-test.com', 'New Tab');
+
+    // 关联到包含 GitHub 的真实窗口（mock 中窗口 ID 不固定，动态查找）
+    // 注意：addTabToWorkspace 已把数据写入存储，这里重新加载以确保对象状态最新
+    const syncToWindowData = await loadWorkspaces();
+    const syncToWindowWsFresh = syncToWindowData.workspaces.find(w => w.id === syncToWindowWs.id);
+    const allSyncWindows = await chrome.windows.getAll({ populate: true });
+    const windowA = allSyncWindows.find(w =>
+      w.type === 'normal' &&
+      w.tabs &&
+      w.tabs.some(t => normalizeUrl(t.url) === normalizeUrl('https://github.com'))
+    );
+    associateWindowWithWorkspaceInternal(windowA, syncToWindowWsFresh);
+    syncToWindowWsFresh.updatedAt = nowIso();
+    await saveWorkspaces({ version: '1.0.0', workspaces: [syncToWindowWsFresh] });
+
+    const syncedToWindow = await syncWorkspaceToWindow(syncToWindowWs.id);
+    assert(syncedToWindow === true, 'syncWorkspaceToWindow 返回成功');
+    const dataAfterSyncToWindow = await loadWorkspaces();
+    const syncToWindowWsAfter = dataAfterSyncToWindow.workspaces.find(w => w.id === syncToWindowWs.id);
+    assert(syncToWindowWsAfter.tabs.length === 2, '反向同步后工作区保留 2 个标签页');
+    assert(syncToWindowWsAfter.tabs.every(t => typeof t.realTabId === 'number'), '所有标签页都映射到真实标签页');
+
+    // 测试 24：applyPendingOperations 在窗口关联后自动执行 OPEN
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    await clearPendingOperations();
+    const applyWs = await createWorkspace('自动应用测试');
+    await addTabToWorkspace(applyWs.id, 'https://www.bing.com', 'Bing');
+    await queuePendingOperation(applyWs.id, 'OPEN');
+
+    // 扫描应关联到 windowB 并自动应用待执行操作
+    const applyScanResult = await scanOpenWindowsAndAssociate();
+    assert(applyScanResult.associated >= 1, '扫描关联到窗口');
+    const opsAfterApply = await getPendingOperations(applyWs.id);
+    assert(opsAfterApply.length === 0, '待执行操作已清空');
+    const dataAfterApply = await loadWorkspaces();
+    const applyWsAfter = dataAfterApply.workspaces.find(w => w.id === applyWs.id);
+    assert(applyWsAfter.windowId !== null, '工作区已关联窗口');
+    assert(applyWsAfter.tabs.some(t => t.realTabId), '标签页已同步到窗口');
 
     // 输出汇总
     summaryEl.textContent = `测试完成：通过 ${passCount} 项，失败 ${failCount} 项`;

@@ -87,14 +87,25 @@
     storage: {
       local: {
         get(keys) {
-          return Promise.resolve({
-            workspaceData: localStorage.workspaceData
-          });
+          const result = {};
+          if (keys === null || keys === undefined) {
+            Object.keys(localStorage).forEach((key) => {
+              result[key] = JSON.parse(JSON.stringify(localStorage[key]));
+            });
+          } else {
+            const keyArray = Array.isArray(keys) ? keys : [keys];
+            keyArray.forEach((key) => {
+              if (localStorage[key] !== undefined) {
+                result[key] = JSON.parse(JSON.stringify(localStorage[key]));
+              }
+            });
+          }
+          return Promise.resolve(result);
         },
         set(items) {
-          if (items.workspaceData) {
-            localStorage.workspaceData = JSON.parse(JSON.stringify(items.workspaceData));
-          }
+          Object.keys(items).forEach((key) => {
+            localStorage[key] = JSON.parse(JSON.stringify(items[key]));
+          });
           return Promise.resolve();
         }
       },
