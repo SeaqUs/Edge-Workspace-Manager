@@ -103,6 +103,12 @@
       }
     },
 
+    runtime: {
+      getURL(path) {
+        return `http://localhost:8765/${path}`;
+      }
+    },
+
     windows: {
       create(options) {
         const windowId = nextWindowId++;

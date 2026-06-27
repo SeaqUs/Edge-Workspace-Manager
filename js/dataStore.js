@@ -14,6 +14,12 @@ const DEFAULT_DATA = {
   workspaces: []
 };
 
+// URL 关联匹配阈值：窗口与工作区至少有一半标签页 URL 匹配才建立关联
+const WINDOW_MATCH_THRESHOLD = 0.5;
+
+// 打开工作区时复用已存在窗口的严格阈值，避免把单标签页窗口误关联到多标签页工作区
+const WINDOW_MATCH_THRESHOLD_STRICT = 0.8;
+
 /**
  * 生成唯一 ID
  * @param {string} prefix - ID 前缀，例如 'ws' / 'tab' / 'group'
@@ -26,6 +32,7 @@ function generateId(prefix = 'id') {
 }
 
 /**
+/**
  * 获取当前 ISO 格式时间字符串
  * @returns {string} ISO 8601 时间字符串
  */
@@ -34,7 +41,176 @@ function nowIso() {
 }
 
 /**
- * 从 chrome.storage.local 读取工作区数据
+ * 规范化 URL，用于窗口与工作区之间的关联匹配
+ * 移除尾部斜杠、fragment 并转小写，忽略新建标签页地址
+ * @param {string} url - 原始 URL
+ * @returns {string|null} 规范化后的 URL
+ */
+function normalizeUrl(url) {
+  if (!url || url === 'edge://newtab/' || url === 'about://newtab/' || url === 'chrome://newtab/') {
+    return null;
+  }
+  try {
+    const u = new URL(url.trim());
+    // 忽略 fragment
+    u.hash = '';
+    let result = u.toString().toLowerCase();
+    if (result.endsWith('/')) {
+      result = result.slice(0, -1);
+    }
+    return result;
+  } catch (error) {
+    return url.trim().toLowerCase();
+  }
+}
+
+/**
+ * 计算浏览器窗口与工作区的标签页 URL 匹配度
+ * @param {object} chromeWindow - 包含 tabs 的窗口对象
+ * @param {object} ws - 工作区对象
+ * @returns {number} 匹配度分数，范围 0-1
+ */
+function calculateWindowMatchScore(chromeWindow, ws) {
+  if (!chromeWindow || !chromeWindow.tabs || chromeWindow.tabs.length === 0) return 0;
+  if (!ws || !ws.tabs || ws.tabs.length === 0) return 0;
+
+  const windowUrls = chromeWindow.tabs.map(t => normalizeUrl(t.url)).filter(Boolean);
+  const wsUrls = ws.tabs.map(t => normalizeUrl(t.url)).filter(Boolean);
+
+  if (windowUrls.length === 0 || wsUrls.length === 0) return 0;
+
+  const matched = windowUrls.filter(url => wsUrls.includes(url)).length;
+  return matched / Math.max(windowUrls.length, wsUrls.length);
+}
+
+/**
+ * 将指定浏览器窗口关联到指定工作区（内部直接操作，不保存存储）
+ * 调用方需确保传入的数据对象最终执行 saveWorkspaces
+ * @param {object} chromeWindow - 包含 tabs 的窗口对象
+ * @param {object} ws - 要关联的工作区对象
+ */
+function associateWindowWithWorkspaceInternal(chromeWindow, ws) {
+  if (!chromeWindow || !chromeWindow.id || !ws) return;
+
+  ws.windowId = chromeWindow.id;
+  ws.tabs.forEach((tab) => {
+    const chromeTab = chromeWindow.tabs.find(t => normalizeUrl(t.url) === normalizeUrl(tab.url));
+    if (chromeTab) {
+      tab.realTabId = chromeTab.id;
+    } else {
+      delete tab.realTabId;
+    }
+  });
+}
+
+/**
+ * 尝试将单个浏览器窗口与未关联的工作区进行关联
+ * @param {object} chromeWindow - 包含 tabs 的窗口对象
+ * @returns {Promise<boolean>} 是否成功关联
+ */
+async function tryAssociateWindowWithWorkspace(chromeWindow) {
+  if (!chromeWindow || !chromeWindow.tabs || chromeWindow.tabs.length === 0) return false;
+
+  const data = await loadWorkspaces();
+  const windowUrls = chromeWindow.tabs.map(t => normalizeUrl(t.url)).filter(Boolean);
+  if (windowUrls.length === 0) return false;
+
+  let bestMatch = null;
+  let bestScore = 0;
+
+  for (const ws of data.workspaces) {
+    if (ws.windowId) continue;
+
+    const wsUrls = ws.tabs.map(t => normalizeUrl(t.url)).filter(Boolean);
+    if (wsUrls.length === 0) continue;
+
+    const matched = windowUrls.filter(url => wsUrls.includes(url)).length;
+    const score = matched / Math.max(windowUrls.length, wsUrls.length);
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestMatch = ws;
+    }
+  }
+
+  if (bestMatch && bestScore >= WINDOW_MATCH_THRESHOLD) {
+    associateWindowWithWorkspaceInternal(chromeWindow, bestMatch);
+    bestMatch.updatedAt = nowIso();
+    await saveWorkspaces(data);
+    console.log(`[Edge Workspace Manager] 窗口 ${chromeWindow.id} 已自动关联到工作区 ${bestMatch.id}，匹配度 ${(bestScore * 100).toFixed(0)}%`);
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * 扫描所有已打开的普通窗口，尝试与未关联的工作区建立关联
+ * 适用于 Edge 原生按钮切换/打开工作区后，手动或自动同步扩展状态
+ * @returns {Promise<{associated: number, unmatchedWindows: object[]}>}
+ */
+async function scanOpenWindowsAndAssociate() {
+  try {
+    const data = await loadWorkspaces();
+    const unassociatedWorkspaces = data.workspaces.filter(ws => !ws.windowId);
+    if (unassociatedWorkspaces.length === 0) {
+      return { associated: 0, unmatchedWindows: [] };
+    }
+
+    const allWindows = await chrome.windows.getAll({ populate: true });
+    const normalWindows = allWindows.filter(w => w.type === 'normal' && w.tabs && w.tabs.length > 0);
+
+    let associatedCount = 0;
+    const matchedWindowIds = new Set();
+
+    for (const ws of unassociatedWorkspaces) {
+      let bestMatch = null;
+      let bestScore = 0;
+
+      for (const chromeWindow of normalWindows) {
+        if (matchedWindowIds.has(chromeWindow.id)) continue;
+
+        const score = calculateWindowMatchScore(chromeWindow, ws);
+        if (score > bestScore) {
+          bestScore = score;
+          bestMatch = chromeWindow;
+        }
+      }
+
+      if (bestMatch && bestScore >= WINDOW_MATCH_THRESHOLD) {
+        associateWindowWithWorkspaceInternal(bestMatch, ws);
+        ws.updatedAt = nowIso();
+        matchedWindowIds.add(bestMatch.id);
+        associatedCount++;
+      }
+    }
+
+    if (associatedCount > 0) {
+      await saveWorkspaces(data);
+    }
+
+    const unmatchedWindows = normalWindows
+      .filter(w => !matchedWindowIds.has(w.id))
+      .map(w => ({
+        id: w.id,
+        title: w.title || `窗口 ${w.id}`,
+        tabCount: w.tabs.length,
+        tabs: w.tabs.map(t => ({
+          url: t.url,
+          title: t.title || t.url || '新标签页',
+          favIconUrl: t.favIconUrl
+        }))
+      }));
+
+    return { associated: associatedCount, unmatchedWindows };
+  } catch (error) {
+    console.error('[Edge Workspace Manager] 扫描窗口关联失败:', error);
+    return { associated: 0, unmatchedWindows: [] };
+  }
+}
+
+/**
+ * 创建新工作区从 chrome.storage.local 读取工作区数据
  * @returns {Promise<object>} 完整工作区数据对象
  */
 async function loadWorkspaces() {
@@ -351,7 +527,35 @@ async function openWorkspace(workspaceId) {
     }
   }
 
-  // 根据标签页 URL 列表创建新窗口
+  // 在创建新窗口前，先扫描已打开的窗口：
+  // 若用户已通过 Edge 原生按钮打开该工作区（窗口 URL 高度匹配），
+  // 则直接关联已有窗口，避免重复创建“伪工作区”多标签窗口。
+  try {
+    const allWindows = await chrome.windows.getAll({ populate: true });
+    const candidateWindows = allWindows.filter(w => w.type === 'normal' && w.tabs && w.tabs.length > 0);
+
+    let bestMatch = null;
+    let bestScore = 0;
+    for (const chromeWindow of candidateWindows) {
+      const score = calculateWindowMatchScore(chromeWindow, ws);
+      if (score > bestScore) {
+        bestScore = score;
+        bestMatch = chromeWindow;
+      }
+    }
+
+    if (bestMatch && bestScore >= WINDOW_MATCH_THRESHOLD_STRICT) {
+      associateWindowWithWorkspaceInternal(bestMatch, ws);
+      ws.updatedAt = nowIso();
+      await saveWorkspaces(data);
+      console.log(`[Edge Workspace Manager] 工作区 ${ws.id} 已关联到已存在窗口 ${bestMatch.id}，匹配度 ${(bestScore * 100).toFixed(0)}%`);
+      return ws;
+    }
+  } catch (error) {
+    console.warn('[Edge Workspace Manager] 检查已存在窗口失败:', error);
+  }
+
+  // 未找到匹配窗口，根据标签页 URL 列表创建新窗口
   const urls = ws.tabs.length > 0 ? ws.tabs.map(t => t.url) : ['edge://newtab/'];
   try {
     const newWindow = await chrome.windows.create({
@@ -650,6 +854,43 @@ async function syncWorkspaceFromWindow(workspaceId) {
 }
 
 /**
+ * 将当前聚焦的浏览器窗口关联到指定工作区
+ * 用于 Edge 原生按钮打开窗口后，手动建立扩展工作区与窗口的映射
+ * @param {string} workspaceId - 工作区 ID
+ * @returns {Promise<boolean>} 是否关联成功
+ */
+async function associateCurrentWindow(workspaceId) {
+  const data = await loadWorkspaces();
+  const ws = data.workspaces.find(w => w.id === workspaceId);
+  if (!ws || ws.windowId) return false;
+
+  try {
+    // 获取最近一次聚焦的窗口
+    const currentWindow = await chrome.windows.getLastFocused({ populate: true });
+    if (!currentWindow || !currentWindow.tabs || currentWindow.tabs.length === 0) {
+      console.warn('[Edge Workspace Manager] 未找到可关联的窗口');
+      return false;
+    }
+
+    // 跳过管理面板窗口
+    const panelUrl = chrome.runtime.getURL('popup.html');
+    if (currentWindow.tabs.some(t => t.url && t.url.startsWith(panelUrl))) {
+      console.warn('[Edge Workspace Manager] 不能关联管理面板窗口');
+      return false;
+    }
+
+    associateWindowWithWorkspaceInternal(currentWindow, ws);
+    ws.updatedAt = nowIso();
+    await saveWorkspaces(data);
+    console.log(`[Edge Workspace Manager] 工作区 ${workspaceId} 已关联到窗口 ${currentWindow.id}`);
+    return true;
+  } catch (error) {
+    console.error('[Edge Workspace Manager] 关联当前窗口失败:', error);
+    return false;
+  }
+}
+
+/**
  * 关闭工作区对应的浏览器窗口
  * @param {string} workspaceId - 工作区 ID
  * @returns {Promise<boolean>} 是否关闭成功
@@ -705,6 +946,12 @@ if (typeof module !== 'undefined' && module.exports) {
     getOpenWindows,
     importSelectedWindows,
     syncWorkspaceFromWindow,
+    associateCurrentWindow,
+    normalizeUrl,
+    calculateWindowMatchScore,
+    associateWindowWithWorkspaceInternal,
+    tryAssociateWindowWithWorkspace,
+    scanOpenWindowsAndAssociate,
     generateId,
     nowIso
   };

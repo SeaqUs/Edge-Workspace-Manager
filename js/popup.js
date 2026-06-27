@@ -14,6 +14,7 @@
   const btnCreateWorkspaceEl = document.getElementById('btn-create-workspace');
   const btnConfirmCreateEl = document.getElementById('btn-confirm-create');
   const btnCancelCreateEl = document.getElementById('btn-cancel-create');
+  const btnScanWindowsEl = document.getElementById('btn-scan-windows');
   const errorMessageEl = document.getElementById('error-message');
 
   // 手动导入面板相关元素
@@ -58,6 +59,7 @@
     btnCreateWorkspaceEl.addEventListener('click', showCreatePanel);
     btnConfirmCreateEl.addEventListener('click', confirmCreateWorkspace);
     btnCancelCreateEl.addEventListener('click', hideCreatePanel);
+    btnScanWindowsEl.addEventListener('click', scanOpenWindows);
 
     inputWorkspaceNameEl.addEventListener('keydown', (event) => {
       if (event.key === 'Enter') {
@@ -353,17 +355,28 @@
     openBtn.className = 'btn btn-small btn-secondary';
     openBtn.type = 'button';
     openBtn.textContent = ws.windowId ? '关闭' : '打开';
+    openBtn.title = ws.windowId ? '关闭该窗口' : '用标签页创建新窗口';
     openBtn.addEventListener('click', () => toggleWorkspace(ws.id));
+    actionsEl.appendChild(openBtn);
 
-    // 仅当窗口已打开时显示同步按钮
     if (ws.windowId) {
+      // 窗口已打开：显示同步按钮
       const syncBtn = document.createElement('button');
       syncBtn.className = 'btn btn-small btn-secondary';
       syncBtn.type = 'button';
       syncBtn.textContent = '同步';
-      syncBtn.title = '将工作区与当前窗口标签页强制同步';
+      syncBtn.title = '将扩展工作区与当前窗口标签页强制同步';
       syncBtn.addEventListener('click', () => syncWorkspace(ws.id));
       actionsEl.appendChild(syncBtn);
+    } else {
+      // 窗口未打开：显示关联当前窗口按钮
+      const associateBtn = document.createElement('button');
+      associateBtn.className = 'btn btn-small btn-secondary';
+      associateBtn.type = 'button';
+      associateBtn.textContent = '关联当前窗口';
+      associateBtn.title = '将当前聚焦的 Edge 窗口关联到此扩展工作区';
+      associateBtn.addEventListener('click', () => associateCurrentWindowToWorkspace(ws.id));
+      actionsEl.appendChild(associateBtn);
     }
 
     const deleteBtn = document.createElement('button');
@@ -371,8 +384,6 @@
     deleteBtn.type = 'button';
     deleteBtn.textContent = '删除';
     deleteBtn.addEventListener('click', () => deleteWorkspace(ws.id));
-
-    actionsEl.appendChild(openBtn);
     actionsEl.appendChild(deleteBtn);
     header.appendChild(titleEl);
     header.appendChild(actionsEl);
@@ -621,11 +632,29 @@
   }
 
   /**
+   * 将当前聚焦的浏览器窗口关联到指定扩展工作区
+   * 用于 Edge 原生按钮打开窗口后手动建立映射
+   * @param {string} workspaceId - 工作区 ID
+   */
+  async function associateCurrentWindowToWorkspace(workspaceId) {
+    try {
+      const response = await sendMessage({ type: 'ASSOCIATE_CURRENT_WINDOW', workspaceId });
+      if (response && response.success) {
+        await loadAndRender();
+      } else {
+        showError('关联失败，请确保目标窗口已打开且不是管理面板窗口');
+      }
+    } catch (error) {
+      showError(`关联窗口失败: ${error.message}`);
+    }
+  }
+
+  /**
    * 删除工作区
    * @param {string} workspaceId - 工作区 ID
    */
   async function deleteWorkspace(workspaceId) {
-    if (!confirm('确定要删除该工作区吗？此操作不可恢复。')) {
+    if (!confirm('确定要删除该扩展工作区吗？此操作不可恢复。')) {
       return;
     }
 
@@ -783,6 +812,32 @@
       }
     } catch (error) {
       showError(`导入所有窗口失败: ${error.message}`);
+    }
+  }
+
+  /**
+   * 扫描当前已打开的普通窗口，尝试自动关联到未打开的扩展工作区
+   * 用于识别用户通过 Edge 原生工作区按钮打开的窗口
+   */
+  async function scanOpenWindows() {
+    try {
+      const response = await sendMessage({ type: 'SCAN_AND_ASSOCIATE_WINDOWS' });
+      if (response && response.success) {
+        const associated = response.associated || 0;
+        const unmatched = (response.unmatchedWindows || []).length;
+        if (associated > 0) {
+          await loadAndRender();
+          showError(`已关联 ${associated} 个窗口到扩展工作区`);
+        } else if (unmatched > 0) {
+          showError(`未发现可关联的匹配窗口，但有 ${unmatched} 个未匹配窗口可导入`);
+        } else {
+          showError('当前没有可关联的已打开窗口');
+        }
+      } else {
+        showError(response && response.error ? response.error : '扫描失败');
+      }
+    } catch (error) {
+      showError(`扫描窗口失败: ${error.message}`);
     }
   }
 

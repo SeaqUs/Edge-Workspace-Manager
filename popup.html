@@ -25,7 +25,7 @@
       <nav class="sidebar-nav">
         <button id="nav-workspaces" class="nav-item active" type="button">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
-          <span>全部工作区</span>
+          <span>扩展工作区</span>
           <span id="stat-workspace-count" class="nav-badge">0</span>
         </button>
         <button id="nav-import" class="nav-item" type="button">
@@ -51,10 +51,14 @@
       <!-- 顶部栏 -->
       <header class="top-bar">
         <div class="top-bar-left">
-          <h2 class="page-title">全部工作区</h2>
-          <p class="page-subtitle">管理并同步 Edge 浏览器窗口与标签页</p>
+          <h2 class="page-title">扩展工作区</h2>
+          <p class="page-subtitle">管理由本扩展维护的浏览器窗口与标签页（与 Edge 原生工作区互相独立）</p>
         </div>
         <div class="top-bar-right">
+          <button id="btn-scan-windows" class="btn btn-secondary" type="button" title="扫描当前已打开的 Edge 窗口并尝试关联到现有工作区">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+            <span>扫描窗口</span>
+          </button>
           <button id="btn-create-workspace" class="btn btn-primary" type="button">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
             <span>新建工作区</span>
@@ -105,8 +109,8 @@
         <div class="empty-icon">
           <svg viewBox="0 0 24 24" width="48" height="48" fill="currentColor"><path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10z"/></svg>
         </div>
-        <h3>暂无工作区</h3>
-        <p>点击右上角“新建工作区”开始，或通过“导入窗口”导入现有 Edge 窗口。</p>
+        <h3>暂无扩展工作区</h3>
+        <p>点击右上角“新建工作区”创建，或通过“导入窗口”将当前 Edge 窗口导入为扩展工作区。</p>
       </div>
 
       <!-- 错误提示 -->

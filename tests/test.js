@@ -160,8 +160,69 @@
     assert(targetAfterMove.tabs[0].id === moveTab.id, '移动的标签页 ID 一致');
     assert(targetAfterMove.tabs[0].groupId === null, '跨区移动后分组关联已清除');
 
+    // 测试 17：关联当前聚焦窗口到未打开的工作区
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    const assocWs = await createWorkspace('待关联工作区');
+    await addTabToWorkspace(assocWs.id, 'https://github.com', 'GitHub');
+
+    const associated = await associateCurrentWindow(assocWs.id);
+    assert(associated === true, 'associateCurrentWindow 返回成功');
+    const dataAfterAssoc = await loadWorkspaces();
+    const assocWsAfter = dataAfterAssoc.workspaces.find(w => w.id === assocWs.id);
+    assert(assocWsAfter.windowId !== null, '工作区已关联窗口 ID');
+    assert(assocWsAfter.tabs[0].realTabId !== undefined, '标签页已记录真实标签页 ID');
+
     const finalData = await loadWorkspaces();
-    assert(finalData.workspaces.length === 3, '最终存在 3 个工作区（排序测试 + 源 + 目标）');
+    assert(finalData.workspaces.length === 1, '最终存在 1 个工作区');
+
+    // 测试 18：URL 规范化
+    assert(normalizeUrl('https://Example.COM/Page#section') === 'https://example.com/page', 'normalizeUrl 忽略大小写与 fragment');
+    assert(normalizeUrl('https://example.com/page/') === 'https://example.com/page', 'normalizeUrl 移除尾部斜杠');
+    assert(normalizeUrl('edge://newtab/') === null, 'normalizeUrl 忽略新建标签页');
+
+    // 测试 19：窗口与工作区匹配度计算
+    const scoreWindow = {
+      id: 9999,
+      tabs: [
+        { url: 'https://github.com', title: 'GitHub' },
+        { url: 'https://www.bing.com', title: 'Bing' }
+      ]
+    };
+    const scoreWsFull = {
+      tabs: [
+        { url: 'https://github.com' },
+        { url: 'https://www.bing.com' }
+      ]
+    };
+    const scoreWsPartial = {
+      tabs: [
+        { url: 'https://github.com' },
+        { url: 'https://example.com' }
+      ]
+    };
+    assert(calculateWindowMatchScore(scoreWindow, scoreWsFull) === 1, '完全匹配返回 1');
+    assert(calculateWindowMatchScore(scoreWindow, scoreWsPartial) === 0.5, '一半匹配返回 0.5');
+
+    // 测试 20：扫描已打开窗口并自动关联
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    const scanWs = await createWorkspace('扫描匹配工作区');
+    await addTabToWorkspace(scanWs.id, 'https://github.com', 'GitHub');
+
+    const scanResult = await scanOpenWindowsAndAssociate();
+    assert(scanResult.associated >= 1, 'scanOpenWindowsAndAssociate 至少关联 1 个窗口');
+    const dataAfterScan = await loadWorkspaces();
+    const scanWsAfter = dataAfterScan.workspaces.find(w => w.id === scanWs.id);
+    assert(scanWsAfter.windowId !== null, '扫描后工作区已关联窗口');
+
+    // 测试 21：openWorkspace 复用已存在的匹配窗口，而非创建新窗口
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    const reuseWs = await createWorkspace('复用窗口测试');
+    await addTabToWorkspace(reuseWs.id, 'https://www.bing.com', 'Bing');
+
+    // mock-chrome 中 windowB 已包含 https://www.bing.com
+    const openedReuseWs = await openWorkspace(reuseWs.id);
+    assert(openedReuseWs && openedReuseWs.windowId, 'openWorkspace 返回已关联窗口');
+    assert(openedReuseWs.tabs.some(t => t.url === 'https://www.bing.com'), '复用窗口包含匹配标签页');
 
     // 输出汇总
     summaryEl.textContent = `测试完成：通过 ${passCount} 项，失败 ${failCount} 项`;

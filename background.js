@@ -25,6 +25,63 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 });
 
 /**
+ * 监听窗口创建事件：尝试将新窗口与未关联的工作区自动匹配
+ * 当用户通过 Edge 原生按钮打开工作区时，窗口会恢复为普通窗口，
+ * 我们按标签页 URL 相似度进行启发式关联
+ */
+chrome.windows.onCreated.addListener(async (chromeWindow) => {
+  try {
+    if (!chromeWindow || !chromeWindow.id) return;
+
+    // 跳过管理面板窗口
+    const panelUrlPrefix = chrome.runtime.getURL('popup.html');
+    if (chromeWindow.tabs && chromeWindow.tabs.some(t => t.url && t.url.startsWith(panelUrlPrefix))) {
+      return;
+    }
+
+    // 延迟获取完整标签页信息，创建事件触发时 tabs 可能尚未完全加载
+    setTimeout(async () => {
+      try {
+        const fullWindow = await chrome.windows.get(chromeWindow.id, { populate: true });
+        await tryAssociateWindowWithWorkspace(fullWindow);
+      } catch (error) {
+        console.warn('[Edge Workspace Manager] 获取新建窗口详情失败:', error);
+      }
+    }, 500);
+  } catch (error) {
+    console.error('[Edge Workspace Manager] 处理窗口创建事件失败:', error);
+  }
+});
+
+// 焦点切换扫描防抖定时器
+let focusScanTimeout = null;
+
+/**
+ * 监听窗口焦点变化：当存在未关联的工作区时，尝试自动扫描当前打开窗口
+ * 这对用户通过 Edge 原生工作区按钮切换窗口的场景尤为重要
+ */
+chrome.windows.onFocusChanged.addListener(async (windowId) => {
+  if (windowId === chrome.windows.WINDOW_ID_NONE) return;
+
+  // 防抖：频繁切换时只在最后一次停顿后执行
+  if (focusScanTimeout) clearTimeout(focusScanTimeout);
+  focusScanTimeout = setTimeout(async () => {
+    try {
+      const data = await loadWorkspaces();
+      const hasUnassociated = data.workspaces.some(ws => !ws.windowId);
+      if (!hasUnassociated) return;
+
+      const result = await scanOpenWindowsAndAssociate();
+      if (result.associated > 0) {
+        console.log(`[Edge Workspace Manager] 焦点切换后自动关联 ${result.associated} 个窗口`);
+      }
+    } catch (error) {
+      console.error('[Edge Workspace Manager] 焦点切换扫描失败:', error);
+    }
+  }, 300);
+});
+
+/**
  * 监听窗口关闭事件：当工作区对应窗口被关闭时，清空 windowId 关联
  */
 chrome.windows.onRemoved.addListener(async (windowId) => {
@@ -216,6 +273,12 @@ async function handleMessage(request, sender, sendResponse) {
         break;
       }
 
+      case 'ASSOCIATE_CURRENT_WINDOW': {
+        const ok = await associateCurrentWindow(request.workspaceId);
+        sendResponse({ success: ok });
+        break;
+      }
+
       case 'ADD_TAB': {
         const tab = await addTabToWorkspace(request.workspaceId, request.url, request.title);
         sendResponse({ success: !!tab, tab });
@@ -287,6 +350,16 @@ async function handleMessage(request, sender, sendResponse) {
       case 'SYNC_WORKSPACE': {
         const ok = await syncWorkspaceFromWindow(request.workspaceId);
         sendResponse({ success: ok });
+        break;
+      }
+
+      case 'SCAN_AND_ASSOCIATE_WINDOWS': {
+        const result = await scanOpenWindowsAndAssociate();
+        sendResponse({
+          success: true,
+          associated: result.associated,
+          unmatchedWindows: result.unmatchedWindows
+        });
         break;
       }
 
