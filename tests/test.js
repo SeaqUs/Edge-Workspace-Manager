@@ -478,6 +478,156 @@
     assert(nativeTargetFinal.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://note.ms/test')).length === 2, '原生恢复场景目标工作区影子数据中恰好有 2 个 note.ms');
     assert(nativeTargetFinal.tabs.length === nativeTargetWindowAfter.tabs.length, '原生恢复场景目标工作区影子标签页数与真实窗口标签页数一致');
 
+    // 测试 28：从 A 分别移动两个不同页面到 B 和 C，打开三个工作区后互不干扰
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    await clearPendingOperations();
+    const multiSourceWs = await createWorkspace('多目标源工作区 A');
+    const multiTargetB = await createWorkspace('多目标目标工作区 B');
+    const multiTargetC = await createWorkspace('多目标目标工作区 C');
+    const pageA = await addTabToWorkspace(multiSourceWs.id, 'https://page-a.example.com', 'Page A');
+    const pageB = await addTabToWorkspace(multiSourceWs.id, 'https://page-b.example.com', 'Page B');
+
+    const multiDataBeforeMove = await loadWorkspaces();
+    const multiSourceFresh = multiDataBeforeMove.workspaces.find(w => w.id === multiSourceWs.id);
+    const multiTargetBFresh = multiDataBeforeMove.workspaces.find(w => w.id === multiTargetB.id);
+    const multiTargetCFresh = multiDataBeforeMove.workspaces.find(w => w.id === multiTargetC.id);
+    multiSourceFresh.windowId = null;
+    multiSourceFresh.tabs.forEach(tab => delete tab.realTabId);
+    multiTargetBFresh.windowId = null;
+    multiTargetBFresh.tabs.forEach(tab => delete tab.realTabId);
+    multiTargetCFresh.windowId = null;
+    multiTargetCFresh.tabs.forEach(tab => delete tab.realTabId);
+    await saveWorkspaces({ version: '1.0.0', workspaces: [multiSourceFresh, multiTargetBFresh, multiTargetCFresh] });
+
+    assert(await moveTabToWorkspace(pageA.id, multiSourceFresh.id, multiTargetBFresh.id) === true, '多目标场景 pageA 移动到 B 成功');
+    assert(await moveTabToWorkspace(pageB.id, multiSourceFresh.id, multiTargetCFresh.id) === true, '多目标场景 pageB 移动到 C 成功');
+
+    const multiDataAfterMove = await loadWorkspaces();
+    const multiSourceAfterMove = multiDataAfterMove.workspaces.find(w => w.id === multiSourceFresh.id);
+    const multiTargetBAfterMove = multiDataAfterMove.workspaces.find(w => w.id === multiTargetBFresh.id);
+    const multiTargetCAfterMove = multiDataAfterMove.workspaces.find(w => w.id === multiTargetCFresh.id);
+    assert(multiSourceAfterMove.tabs.length === 0, '多目标场景源工作区 A 标签页为空');
+    assert(multiSourceAfterMove.pendingCleanup && multiSourceAfterMove.pendingCleanup.urls.length === 2, '多目标场景源工作区 A 待清理 URL 为 2 个');
+    assert(multiTargetBAfterMove.tabs.length === 1, '多目标场景目标工作区 B 有 1 个标签页');
+    assert(multiTargetCAfterMove.tabs.length === 1, '多目标场景目标工作区 C 有 1 个标签页');
+
+    // 模拟 Edge 原生按钮恢复出的三个窗口
+    const multiSourceWindow = await chrome.windows.create({ url: ['https://page-a.example.com', 'https://page-b.example.com'], focused: false });
+    const multiTargetBWindow = await chrome.windows.create({ url: ['https://page-a.example.com'], focused: false });
+    const multiTargetCWindow = await chrome.windows.create({ url: ['https://page-b.example.com'], focused: false });
+    console.log('[TEST_DEBUG] multiSourceWindow id', multiSourceWindow.id, 'tabs', multiSourceWindow.tabs.map(t => t.url));
+    console.log('[TEST_DEBUG] multiTargetBWindow id', multiTargetBWindow.id, 'tabs', multiTargetBWindow.tabs.map(t => t.url));
+    console.log('[TEST_DEBUG] multiTargetCWindow id', multiTargetCWindow.id, 'tabs', multiTargetCWindow.tabs.map(t => t.url));
+
+    // 清理其他窗口
+    const allWindowsBeforeMultiScan = await chrome.windows.getAll({ populate: true });
+    for (const win of allWindowsBeforeMultiScan) {
+      if (win.id !== multiSourceWindow.id && win.id !== multiTargetBWindow.id && win.id !== multiTargetCWindow.id) {
+        try {
+          await chrome.windows.remove(win.id);
+        } catch (e) {
+          // 忽略清理失败
+        }
+      }
+    }
+
+    const multiScanResult = await scanOpenWindowsAndAssociate();
+    console.log('[TEST_DEBUG] multi scan associated', multiScanResult.associated);
+    const multiDataAfterScan = await loadWorkspaces();
+    console.log('[TEST_DEBUG] multi workspaces after scan', JSON.stringify(multiDataAfterScan.workspaces.map(w => ({ id: w.id, windowId: w.windowId, tabs: w.tabs.map(t => ({ url: t.url, realTabId: t.realTabId })) }))));
+    assert(multiScanResult.associated >= 3, '多目标场景扫描至少关联 3 个工作区');
+
+    // 等待 mock 事件处理完成
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    const multiSourceWindowAfter = await chrome.windows.get(multiSourceWindow.id, { populate: true });
+    console.log('[TEST_DEBUG] multiSourceWindowAfter tabs', multiSourceWindowAfter.tabs.map(t => t.url));
+    assert(multiSourceWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://page-a.example.com')).length === 0, '多目标场景源窗口中 pageA 已关闭');
+    assert(multiSourceWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://page-b.example.com')).length === 0, '多目标场景源窗口中 pageB 已关闭');
+
+    const multiTargetBWindowAfter = await chrome.windows.get(multiTargetBWindow.id, { populate: true });
+    console.log('[TEST_DEBUG] multiTargetBWindowAfter tabs', multiTargetBWindowAfter.tabs.map(t => t.url));
+    assert(multiTargetBWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://page-a.example.com')).length === 1, '多目标场景 B 窗口中恰好有 1 个 pageA');
+
+    const multiTargetCWindowAfter = await chrome.windows.get(multiTargetCWindow.id, { populate: true });
+    console.log('[TEST_DEBUG] multiTargetCWindowAfter tabs', multiTargetCWindowAfter.tabs.map(t => t.url));
+    assert(multiTargetCWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://page-b.example.com')).length === 1, '多目标场景 C 窗口中恰好有 1 个 pageB');
+
+    const multiDataFinal = await loadWorkspaces();
+    const multiSourceFinal = multiDataFinal.workspaces.find(w => w.id === multiSourceFresh.id);
+    const multiTargetBFinal = multiDataFinal.workspaces.find(w => w.id === multiTargetBFresh.id);
+    const multiTargetCFinal = multiDataFinal.workspaces.find(w => w.id === multiTargetCFresh.id);
+    assert(multiSourceFinal.tabs.length === 0, '多目标场景源工作区 A 最终标签页为空');
+    assert(multiSourceFinal.pendingCleanup === undefined, '多目标场景源工作区 A pendingCleanup 已清除');
+    assert(multiTargetBFinal.tabs.length === multiTargetBWindowAfter.tabs.length, '多目标场景 B 影子标签页数与真实窗口一致');
+    assert(multiTargetCFinal.tabs.length === multiTargetCWindowAfter.tabs.length, '多目标场景 C 影子标签页数与真实窗口一致');
+
+    // 测试 29：源工作区 A 未打开时，scan 不应把 A 关联到 B 或 C 的窗口
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    await clearPendingOperations();
+    const orphanSourceWs = await createWorkspace('未打开源工作区 A');
+    const orphanTargetB = await createWorkspace('已打开目标工作区 B');
+    const orphanTargetC = await createWorkspace('已打开目标工作区 C');
+    const orphanPageA = await addTabToWorkspace(orphanSourceWs.id, 'https://orphan-a.example.com', 'Orphan A');
+    const orphanPageB = await addTabToWorkspace(orphanSourceWs.id, 'https://orphan-b.example.com', 'Orphan B');
+
+    const orphanDataBeforeMove = await loadWorkspaces();
+    const orphanSourceFresh = orphanDataBeforeMove.workspaces.find(w => w.id === orphanSourceWs.id);
+    const orphanTargetBFresh = orphanDataBeforeMove.workspaces.find(w => w.id === orphanTargetB.id);
+    const orphanTargetCFresh = orphanDataBeforeMove.workspaces.find(w => w.id === orphanTargetC.id);
+    orphanSourceFresh.windowId = null;
+    orphanSourceFresh.tabs.forEach(tab => delete tab.realTabId);
+    orphanTargetBFresh.windowId = null;
+    orphanTargetBFresh.tabs.forEach(tab => delete tab.realTabId);
+    orphanTargetCFresh.windowId = null;
+    orphanTargetCFresh.tabs.forEach(tab => delete tab.realTabId);
+    await saveWorkspaces({ version: '1.0.0', workspaces: [orphanSourceFresh, orphanTargetBFresh, orphanTargetCFresh] });
+
+    assert(await moveTabToWorkspace(orphanPageA.id, orphanSourceFresh.id, orphanTargetBFresh.id) === true, '未打开源场景 pageA 移动到 B 成功');
+    assert(await moveTabToWorkspace(orphanPageB.id, orphanSourceFresh.id, orphanTargetCFresh.id) === true, '未打开源场景 pageB 移动到 C 成功');
+
+    // 只创建 B 和 C 窗口，不创建 A 窗口
+    const orphanTargetBWindow = await chrome.windows.create({ url: ['https://orphan-a.example.com'], focused: false });
+    const orphanTargetCWindow = await chrome.windows.create({ url: ['https://orphan-b.example.com'], focused: false });
+    console.log('[TEST_DEBUG] orphanTargetBWindow id', orphanTargetBWindow.id, 'tabs', orphanTargetBWindow.tabs.map(t => t.url));
+    console.log('[TEST_DEBUG] orphanTargetCWindow id', orphanTargetCWindow.id, 'tabs', orphanTargetCWindow.tabs.map(t => t.url));
+
+    // 清理其他窗口
+    const allWindowsBeforeOrphanScan = await chrome.windows.getAll({ populate: true });
+    for (const win of allWindowsBeforeOrphanScan) {
+      if (win.id !== orphanTargetBWindow.id && win.id !== orphanTargetCWindow.id) {
+        try {
+          await chrome.windows.remove(win.id);
+        } catch (e) {
+          // 忽略清理失败
+        }
+      }
+    }
+
+    const orphanScanResult = await scanOpenWindowsAndAssociate();
+    console.log('[TEST_DEBUG] orphan scan associated', orphanScanResult.associated);
+    const orphanDataAfterScan = await loadWorkspaces();
+    console.log('[TEST_DEBUG] orphan workspaces after scan', JSON.stringify(orphanDataAfterScan.workspaces.map(w => ({ id: w.id, windowId: w.windowId, tabs: w.tabs.map(t => ({ url: t.url, realTabId: t.realTabId })) }))));
+
+    const orphanSourceAfterScan = orphanDataAfterScan.workspaces.find(w => w.id === orphanSourceFresh.id);
+    const orphanTargetBAfterScan = orphanDataAfterScan.workspaces.find(w => w.id === orphanTargetBFresh.id);
+    const orphanTargetCAfterScan = orphanDataAfterScan.workspaces.find(w => w.id === orphanTargetCFresh.id);
+    assert(orphanSourceAfterScan.windowId === null, '未打开源场景源工作区 A 不应被关联到 B/C 窗口');
+    assert(orphanSourceAfterScan.pendingCleanup && orphanSourceAfterScan.pendingCleanup.urls.length === 2, '未打开源场景源工作区 A pendingCleanup 应保留');
+    assert(orphanTargetBAfterScan.windowId === orphanTargetBWindow.id, '未打开源场景目标工作区 B 关联到 B 窗口');
+    assert(orphanTargetCAfterScan.windowId === orphanTargetCWindow.id, '未打开源场景目标工作区 C 关联到 C 窗口');
+
+    // 等待 mock 事件处理完成
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    const orphanTargetBWindowAfter = await chrome.windows.get(orphanTargetBWindow.id, { populate: true });
+    console.log('[TEST_DEBUG] orphanTargetBWindowAfter tabs', orphanTargetBWindowAfter.tabs.map(t => t.url));
+    assert(orphanTargetBWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://orphan-a.example.com')).length === 1, '未打开源场景 B 窗口仍保留 pageA');
+
+    const orphanTargetCWindowAfter = await chrome.windows.get(orphanTargetCWindow.id, { populate: true });
+    console.log('[TEST_DEBUG] orphanTargetCWindowAfter tabs', orphanTargetCWindowAfter.tabs.map(t => t.url));
+    assert(orphanTargetCWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://orphan-b.example.com')).length === 1, '未打开源场景 C 窗口仍保留 pageB');
+
     // 输出汇总
     summaryEl.textContent = `测试完成：通过 ${passCount} 项，失败 ${failCount} 项`;
     summaryEl.className = failCount === 0 ? 'pass' : 'fail';

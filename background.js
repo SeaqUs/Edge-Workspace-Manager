@@ -170,12 +170,9 @@ async function tryAssociateWindowWithWorkspace(chromeWindow) {
     }
   }
 
-  // 若窗口包含该工作区待清理的 URL，说明这是标签页移出前的原窗口，允许关联。
-  // 仅当匹配度达到阈值或存在待清理 URL 线索时才建立关联，避免把无关窗口误识别为工作区。
-  const hasCleanupMatch = bestMatch && windowContainsPendingCleanupUrls(chromeWindow, bestMatch);
-  const effectiveThreshold = hasCleanupMatch ? 0 : WINDOW_MATCH_THRESHOLD;
-
-  if (bestMatch && (bestScore > effectiveThreshold || hasCleanupMatch)) {
+  // 仅当匹配度严格大于阈值时才建立关联。即使窗口包含待清理 URL，
+  // 也不应在刚好达到阈值时抢占目标工作区窗口，避免源工作区把 B/C 窗口误当原窗口。
+  if (bestMatch && bestScore > WINDOW_MATCH_THRESHOLD) {
     associateWindowWithWorkspaceInternal(chromeWindow, bestMatch);
     bestMatch.updatedAt = nowIso();
     await saveWorkspaces(data);
@@ -244,7 +241,8 @@ async function scanOpenWindowsAndAssociate() {
         }
       }
 
-      if (bestMatch && bestScore >= WINDOW_MATCH_THRESHOLD) {
+      // 源工作区必须使用严格大于阈值，防止只含单个待清理 URL 的目标窗口被抢占
+      if (bestMatch && bestScore > WINDOW_MATCH_THRESHOLD) {
         associateWindowWithWorkspaceInternal(bestMatch, ws);
         ws.updatedAt = nowIso();
         matchedWindowIds.add(bestMatch.id);
@@ -298,9 +296,10 @@ async function scanOpenWindowsAndAssociate() {
         }
       }
 
-      // 没有 URL 线索时不强行关联，避免误连到不相关的窗口
+      // 没有 URL 线索时不强行关联，避免误连到不相关的窗口。
+      // 带 pendingCleanup 的源工作区仍使用严格大于阈值，避免抢占目标窗口。
       const hasCleanupMatch = bestMatch && windowContainsPendingCleanupUrls(bestMatch, ws);
-      if (bestMatch && (bestScore > 0 || hasCleanupMatch)) {
+      if (bestMatch && (bestScore > WINDOW_MATCH_THRESHOLD || (!hasCleanupMatch && bestScore > 0))) {
         associateWindowWithWorkspaceInternal(bestMatch, ws);
         ws.updatedAt = nowIso();
         matchedWindowIds.add(bestMatch.id);
