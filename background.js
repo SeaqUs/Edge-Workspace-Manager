@@ -633,13 +633,14 @@ async function moveTabToWorkspace(tabId, sourceWorkspaceId, targetWorkspaceId) {
   sourceWs.updatedAt = nowIso();
   targetWs.updatedAt = nowIso();
 
-  // 源窗口未打开时，记录待清理 URL 并入队 SYNC 意图，
+  // 源窗口未打开时，记录待清理 URL 及目标工作区 ID，并入队 SYNC 意图，
   // 等源窗口被检测到后自动关闭已移出的标签页。
   if (!sourceWs.windowId) {
     if (!sourceWs.pendingCleanup) {
-      sourceWs.pendingCleanup = { urls: [], createdAt: nowIso() };
+      sourceWs.pendingCleanup = { urls: [], targetWorkspaceId: targetWorkspaceId, createdAt: nowIso() };
     }
     sourceWs.pendingCleanup.urls.push(movedTab.url);
+    sourceWs.pendingCleanup.targetWorkspaceId = targetWorkspaceId;
     sourceWs.pendingCleanup.createdAt = nowIso();
     if (!(await hasPendingOperations(sourceWorkspaceId))) {
       await queuePendingOperation(sourceWorkspaceId, 'SYNC', { reason: 'tabs_moved_out' });
@@ -670,6 +671,149 @@ async function moveTabToWorkspace(tabId, sourceWorkspaceId, targetWorkspaceId) {
       await syncWorkspaceToWindow(targetWorkspaceId);
     } catch (error) {
       console.error('[Edge Workspace Manager] 同步目标工作区窗口失败:', error);
+    }
+  }
+
+  return true;
+}
+
+/**
+ * 批量移动标签页到另一个工作区
+ * 适用于从同一个源工作区一次性移动多个标签页到同一目标工作区
+ * @param {string[]} tabIds - 标签页内部 ID 数组
+ * @param {string} sourceWorkspaceId - 源工作区 ID
+ * @param {string} targetWorkspaceId - 目标工作区 ID
+ * @returns {Promise<boolean>} 是否全部移动成功
+ */
+async function moveTabsToWorkspace(tabIds, sourceWorkspaceId, targetWorkspaceId) {
+  if (!Array.isArray(tabIds) || tabIds.length === 0) return false;
+  if (sourceWorkspaceId === targetWorkspaceId) return false;
+
+  const moves = tabIds.map(tabId => ({
+    tabId,
+    sourceWorkspaceId,
+    targetWorkspaceId
+  }));
+  return moveTabsToWorkspaces(moves);
+}
+
+/**
+ * 批量移动标签页到多个目标工作区
+ * 支持一对多（同一源到多目标）、多对一（多源到同一目标）以及多对多等组合
+ * @param {Array<{tabId:string, sourceWorkspaceId:string, targetWorkspaceId:string}>} moves - 移动计划
+ * @returns {Promise<boolean>} 是否至少有一条移动成功
+ */
+async function moveTabsToWorkspaces(moves) {
+  if (!Array.isArray(moves) || moves.length === 0) return false;
+
+  const data = await loadWorkspaces();
+  const affectedSourceIds = new Set();
+  const affectedTargetIds = new Set();
+  const queuedSyncIds = new Set();
+  const queuedOpenIds = new Set();
+
+  // 按源工作区分组，并按原索引倒序处理，避免多次 splice 相互影响
+  const movesBySource = new Map();
+  const moveKeySet = new Set();
+
+  for (const move of moves) {
+    if (!move || move.sourceWorkspaceId === move.targetWorkspaceId) continue;
+
+    const sourceWs = data.workspaces.find(w => w.id === move.sourceWorkspaceId);
+    const targetWs = data.workspaces.find(w => w.id === move.targetWorkspaceId);
+    if (!sourceWs || !targetWs) continue;
+
+    const tab = sourceWs.tabs.find(t => t.id === move.tabId);
+    if (!tab) continue;
+
+    // 去重：同一标签页在同一源工作区只能移动一次
+    const key = `${move.sourceWorkspaceId}:${move.tabId}`;
+    if (moveKeySet.has(key)) continue;
+    moveKeySet.add(key);
+
+    if (!movesBySource.has(move.sourceWorkspaceId)) {
+      movesBySource.set(move.sourceWorkspaceId, []);
+    }
+    movesBySource.get(move.sourceWorkspaceId).push({ move, sourceWs, targetWs, tab });
+  }
+
+  if (movesBySource.size === 0) return false;
+
+  for (const [, sourceMoves] of movesBySource) {
+    sourceMoves.sort((a, b) => {
+      const idxA = a.sourceWs.tabs.indexOf(a.tab);
+      const idxB = b.sourceWs.tabs.indexOf(b.tab);
+      return idxB - idxA;
+    });
+
+    for (const { move, sourceWs, targetWs, tab } of sourceMoves) {
+      const tabIndex = sourceWs.tabs.indexOf(tab);
+      if (tabIndex === -1) continue;
+
+      sourceWs.tabs.splice(tabIndex, 1);
+      tab.groupId = null; // 移动到新区后清除原分组关联
+      // 标签页已属于新工作区，旧的 realTabId 必须清除
+      delete tab.realTabId;
+      targetWs.tabs.push(tab);
+      sourceWs.updatedAt = nowIso();
+      targetWs.updatedAt = nowIso();
+
+      // 源窗口未打开时，记录待清理 URL 及目标工作区 ID，
+      // 等源窗口被检测到后自动关闭已移出的标签页。
+      if (!sourceWs.windowId) {
+        if (!sourceWs.pendingCleanup) {
+          sourceWs.pendingCleanup = { urls: [], targetWorkspaceId: move.targetWorkspaceId, createdAt: nowIso() };
+        }
+        sourceWs.pendingCleanup.urls.push(tab.url);
+        sourceWs.pendingCleanup.targetWorkspaceId = move.targetWorkspaceId;
+        sourceWs.pendingCleanup.createdAt = nowIso();
+      }
+
+      // 目标窗口未打开时，仅入队一次 OPEN 意图
+      if (!targetWs.windowId && !queuedOpenIds.has(targetWs.id)) {
+        if (!(await hasPendingOperations(targetWs.id))) {
+          await queuePendingOperation(targetWs.id, 'OPEN', { reason: 'tabs_moved_in' });
+        }
+        queuedOpenIds.add(targetWs.id);
+      }
+
+      affectedSourceIds.add(sourceWs.id);
+      affectedTargetIds.add(targetWs.id);
+    }
+
+    // 源工作区未打开时，仅入队一次 SYNC 意图，用于后续关闭已移出标签页
+    const firstSourceMove = sourceMoves[0];
+    const sourceWs = firstSourceMove.sourceWs;
+    if (!sourceWs.windowId && !queuedSyncIds.has(sourceWs.id)) {
+      if (!(await hasPendingOperations(sourceWs.id))) {
+        await queuePendingOperation(sourceWs.id, 'SYNC', { reason: 'tabs_moved_out' });
+      }
+      queuedSyncIds.add(sourceWs.id);
+    }
+  }
+
+  await saveWorkspaces(data);
+
+  // 对已打开的受影响工作区执行反向同步，立即反映移动结果
+  for (const sourceId of affectedSourceIds) {
+    const ws = data.workspaces.find(w => w.id === sourceId);
+    if (ws && ws.windowId) {
+      try {
+        await syncWorkspaceToWindow(sourceId);
+      } catch (error) {
+        console.error('[Edge Workspace Manager] 批量移动后同步源工作区窗口失败:', error);
+      }
+    }
+  }
+
+  for (const targetId of affectedTargetIds) {
+    const ws = data.workspaces.find(w => w.id === targetId);
+    if (ws && ws.windowId) {
+      try {
+        await syncWorkspaceToWindow(targetId);
+      } catch (error) {
+        console.error('[Edge Workspace Manager] 批量移动后同步目标工作区窗口失败:', error);
+      }
     }
   }
 
@@ -1346,6 +1490,8 @@ if (typeof module !== 'undefined' && module.exports) {
     addTabToWorkspace,
     removeTabFromWorkspace,
     moveTabToWorkspace,
+    moveTabsToWorkspace,
+    moveTabsToWorkspaces,
     reorderTab,
     createGroup,
     assignTabToGroup,
@@ -1739,6 +1885,12 @@ async function handleMessage(request, sender, sendResponse) {
           request.sourceWorkspaceId,
           request.targetWorkspaceId
         );
+        sendResponse({ success: ok });
+        break;
+      }
+
+      case 'MOVE_TABS': {
+        const ok = await moveTabsToWorkspaces(request.moves);
         sendResponse({ success: ok });
         break;
       }

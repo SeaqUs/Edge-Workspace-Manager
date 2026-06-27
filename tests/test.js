@@ -628,6 +628,134 @@
     console.log('[TEST_DEBUG] orphanTargetCWindowAfter tabs', orphanTargetCWindowAfter.tabs.map(t => t.url));
     assert(orphanTargetCWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://orphan-b.example.com')).length === 1, '未打开源场景 C 窗口仍保留 pageB');
 
+    // 测试 30：批量移动 API - 将源工作区多个标签页一次性移到同一目标工作区
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    await clearPendingOperations();
+    const batchSourceWs = await createWorkspace('批量源工作区 A');
+    const batchTargetWs = await createWorkspace('批量目标工作区 B');
+    const batchPage1 = await addTabToWorkspace(batchSourceWs.id, 'https://batch-page1.example.com', 'Batch Page 1');
+    const batchPage2 = await addTabToWorkspace(batchSourceWs.id, 'https://batch-page2.example.com', 'Batch Page 2');
+
+    const batchDataBeforeMove = await loadWorkspaces();
+    const batchSourceFresh = batchDataBeforeMove.workspaces.find(w => w.id === batchSourceWs.id);
+    const batchTargetFresh = batchDataBeforeMove.workspaces.find(w => w.id === batchTargetWs.id);
+    batchSourceFresh.windowId = null;
+    batchSourceFresh.tabs.forEach(tab => delete tab.realTabId);
+    batchTargetFresh.windowId = null;
+    batchTargetFresh.tabs.forEach(tab => delete tab.realTabId);
+    await saveWorkspaces({ version: '1.0.0', workspaces: [batchSourceFresh, batchTargetFresh] });
+
+    const batchMoveResult = await moveTabsToWorkspace(
+      [batchPage1.id, batchPage2.id],
+      batchSourceFresh.id,
+      batchTargetFresh.id
+    );
+    assert(batchMoveResult === true, '批量移动 API 一次性移动两个标签页成功');
+
+    const batchDataAfterMove = await loadWorkspaces();
+    const batchSourceAfterMove = batchDataAfterMove.workspaces.find(w => w.id === batchSourceFresh.id);
+    const batchTargetAfterMove = batchDataAfterMove.workspaces.find(w => w.id === batchTargetFresh.id);
+    assert(batchSourceAfterMove.tabs.length === 0, '批量移动后源工作区 A 标签页为空');
+    assert(batchTargetAfterMove.tabs.length === 2, '批量移动后目标工作区 B 包含 2 个标签页');
+    assert(batchTargetAfterMove.tabs.some(t => t.url === 'https://batch-page1.example.com'), '批量移动后 B 包含 page1');
+    assert(batchTargetAfterMove.tabs.some(t => t.url === 'https://batch-page2.example.com'), '批量移动后 B 包含 page2');
+
+    // 测试 31：批量移动 API - 一对多（同一源工作区分别移动到多个目标工作区）
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    await clearPendingOperations();
+    const multiBatchSource = await createWorkspace('批量一对多源 A');
+    const multiBatchTargetB = await createWorkspace('批量一对多目标 B');
+    const multiBatchTargetC = await createWorkspace('批量一对多目标 C');
+    const multiPageA = await addTabToWorkspace(multiBatchSource.id, 'https://multi-a.example.com', 'Multi A');
+    const multiPageB = await addTabToWorkspace(multiBatchSource.id, 'https://multi-b.example.com', 'Multi B');
+
+    const multiBatchDataBefore = await loadWorkspaces();
+    const multiBatchSourceFresh = multiBatchDataBefore.workspaces.find(w => w.id === multiBatchSource.id);
+    const multiBatchTargetBFresh = multiBatchDataBefore.workspaces.find(w => w.id === multiBatchTargetB.id);
+    const multiBatchTargetCFresh = multiBatchDataBefore.workspaces.find(w => w.id === multiBatchTargetC.id);
+    multiBatchSourceFresh.windowId = null;
+    multiBatchSourceFresh.tabs.forEach(tab => delete tab.realTabId);
+    multiBatchTargetBFresh.windowId = null;
+    multiBatchTargetBFresh.tabs.forEach(tab => delete tab.realTabId);
+    multiBatchTargetCFresh.windowId = null;
+    multiBatchTargetCFresh.tabs.forEach(tab => delete tab.realTabId);
+    await saveWorkspaces({ version: '1.0.0', workspaces: [multiBatchSourceFresh, multiBatchTargetBFresh, multiBatchTargetCFresh] });
+
+    const multiBatchMoves = [
+      { tabId: multiPageA.id, sourceWorkspaceId: multiBatchSourceFresh.id, targetWorkspaceId: multiBatchTargetBFresh.id },
+      { tabId: multiPageB.id, sourceWorkspaceId: multiBatchSourceFresh.id, targetWorkspaceId: multiBatchTargetCFresh.id }
+    ];
+    assert(await moveTabsToWorkspaces(multiBatchMoves) === true, '批量一对多移动成功');
+
+    const multiBatchSourceWindow = await chrome.windows.create({ url: ['https://multi-a.example.com', 'https://multi-b.example.com'], focused: false });
+    const multiBatchTargetBWindow = await chrome.windows.create({ url: ['https://multi-a.example.com'], focused: false });
+    const multiBatchTargetCWindow = await chrome.windows.create({ url: ['https://multi-b.example.com'], focused: false });
+
+    // 清理其他窗口
+    const allWindowsBeforeMultiBatchScan = await chrome.windows.getAll({ populate: true });
+    for (const win of allWindowsBeforeMultiBatchScan) {
+      if (win.id !== multiBatchSourceWindow.id && win.id !== multiBatchTargetBWindow.id && win.id !== multiBatchTargetCWindow.id) {
+        try {
+          await chrome.windows.remove(win.id);
+        } catch (e) {
+          // 忽略清理失败
+        }
+      }
+    }
+
+    const multiBatchScanResult = await scanOpenWindowsAndAssociate();
+    console.log('[TEST_DEBUG] multi batch scan associated', multiBatchScanResult.associated);
+    assert(multiBatchScanResult.associated >= 3, '批量一对多扫描至少关联 3 个工作区');
+
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    const multiBatchSourceWindowAfter = await chrome.windows.get(multiBatchSourceWindow.id, { populate: true });
+    assert(multiBatchSourceWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://multi-a.example.com')).length === 0, '批量一对多源窗口中 pageA 已关闭');
+    assert(multiBatchSourceWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://multi-b.example.com')).length === 0, '批量一对多源窗口中 pageB 已关闭');
+
+    const multiBatchTargetBWindowAfter = await chrome.windows.get(multiBatchTargetBWindow.id, { populate: true });
+    assert(multiBatchTargetBWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://multi-a.example.com')).length === 1, '批量一对多 B 窗口中恰好有 1 个 pageA');
+
+    const multiBatchTargetCWindowAfter = await chrome.windows.get(multiBatchTargetCWindow.id, { populate: true });
+    assert(multiBatchTargetCWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://multi-b.example.com')).length === 1, '批量一对多 C 窗口中恰好有 1 个 pageB');
+
+    // 测试 32：批量移动 API - 多对一（多个源工作区标签页移到同一目标工作区）
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    await clearPendingOperations();
+    const manySourceA = await createWorkspace('多对一源 A');
+    const manySourceB = await createWorkspace('多对一源 B');
+    const manyTargetC = await createWorkspace('多对一目标 C');
+    const manyPageA = await addTabToWorkspace(manySourceA.id, 'https://many-a.example.com', 'Many A');
+    const manyPageB = await addTabToWorkspace(manySourceB.id, 'https://many-b.example.com', 'Many B');
+
+    const manyDataBefore = await loadWorkspaces();
+    const manySourceAFresh = manyDataBefore.workspaces.find(w => w.id === manySourceA.id);
+    const manySourceBFresh = manyDataBefore.workspaces.find(w => w.id === manySourceB.id);
+    const manyTargetCFresh = manyDataBefore.workspaces.find(w => w.id === manyTargetC.id);
+    manySourceAFresh.windowId = null;
+    manySourceAFresh.tabs.forEach(tab => delete tab.realTabId);
+    manySourceBFresh.windowId = null;
+    manySourceBFresh.tabs.forEach(tab => delete tab.realTabId);
+    manyTargetCFresh.windowId = null;
+    manyTargetCFresh.tabs.forEach(tab => delete tab.realTabId);
+    await saveWorkspaces({ version: '1.0.0', workspaces: [manySourceAFresh, manySourceBFresh, manyTargetCFresh] });
+
+    const manyToOneMoves = [
+      { tabId: manyPageA.id, sourceWorkspaceId: manySourceAFresh.id, targetWorkspaceId: manyTargetCFresh.id },
+      { tabId: manyPageB.id, sourceWorkspaceId: manySourceBFresh.id, targetWorkspaceId: manyTargetCFresh.id }
+    ];
+    assert(await moveTabsToWorkspaces(manyToOneMoves) === true, '多对一批量移动成功');
+
+    const manyDataAfterMove = await loadWorkspaces();
+    const manySourceAAfterMove = manyDataAfterMove.workspaces.find(w => w.id === manySourceAFresh.id);
+    const manySourceBAfterMove = manyDataAfterMove.workspaces.find(w => w.id === manySourceBFresh.id);
+    const manyTargetCAfterMove = manyDataAfterMove.workspaces.find(w => w.id === manyTargetCFresh.id);
+    assert(manySourceAAfterMove.tabs.length === 0, '多对一源 A 标签页为空');
+    assert(manySourceBAfterMove.tabs.length === 0, '多对一源 B 标签页为空');
+    assert(manyTargetCAfterMove.tabs.length === 2, '多对一目标 C 包含 2 个标签页');
+    assert(manyTargetCAfterMove.tabs.some(t => t.url === 'https://many-a.example.com'), '多对一目标 C 包含 pageA');
+    assert(manyTargetCAfterMove.tabs.some(t => t.url === 'https://many-b.example.com'), '多对一目标 C 包含 pageB');
+
     // 输出汇总
     summaryEl.textContent = `测试完成：通过 ${passCount} 项，失败 ${failCount} 项`;
     summaryEl.className = failCount === 0 ? 'pass' : 'fail';

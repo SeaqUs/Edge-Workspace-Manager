@@ -38,6 +38,8 @@
   let importableWindows = [];
   // 存在待执行操作的工作区 ID 集合
   let pendingWorkspaceIds = new Set();
+  // 当前多选中的标签页集合，键格式为 "workspaceId:tabId"
+  const selectedTabs = new Set();
 
   /**
    * 页面加载完成后初始化
@@ -584,8 +586,11 @@
    * @returns {HTMLElement} 标签页根元素
    */
   function buildTabItem(ws, tab) {
+    const selectionKey = `${ws.id}:${tab.id}`;
+    const isSelected = selectedTabs.has(selectionKey);
+
     const item = document.createElement('div');
-    item.className = 'tab-item';
+    item.className = `tab-item${isSelected ? ' selected' : ''}`;
     item.draggable = true;
     item.dataset.tabId = tab.id;
     item.dataset.workspaceId = ws.id;
@@ -593,6 +598,19 @@
     // 拖拽事件绑定
     item.addEventListener('dragstart', handleTabDragStart);
     item.addEventListener('dragend', handleTabDragEnd);
+
+    // 多选复选框
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.className = 'tab-select';
+    checkbox.checked = isSelected;
+    checkbox.title = '选择该标签页以批量移动';
+    checkbox.addEventListener('change', (event) => {
+      event.stopPropagation();
+      toggleTabSelection(ws.id, tab.id, checkbox.checked);
+      // 同步更新当前项的选中样式
+      item.classList.toggle('selected', checkbox.checked);
+    });
 
     const favicon = document.createElement('img');
     favicon.className = 'tab-favicon';
@@ -643,11 +661,40 @@
     actionsEl.appendChild(groupSelect);
     actionsEl.appendChild(removeBtn);
 
+    item.appendChild(checkbox);
     item.appendChild(favicon);
     item.appendChild(title);
     item.appendChild(actionsEl);
 
     return item;
+  }
+
+  /**
+   * 切换单个标签页的选中状态
+   * @param {string} workspaceId - 工作区 ID
+   * @param {string} tabId - 标签页 ID
+   * @param {boolean} selected - 是否选中
+   */
+  function toggleTabSelection(workspaceId, tabId, selected) {
+    const key = `${workspaceId}:${tabId}`;
+    if (selected) {
+      selectedTabs.add(key);
+    } else {
+      selectedTabs.delete(key);
+    }
+  }
+
+  /**
+   * 获取指定工作区中当前已选中的标签页 ID 列表（按工作区标签页顺序）
+   * @param {string} workspaceId - 工作区 ID
+   * @returns {string[]} 选中的标签页 ID 数组
+   */
+  function getSelectedTabIdsForWorkspace(workspaceId) {
+    const ws = workspaceData.workspaces.find(w => w.id === workspaceId);
+    if (!ws || !ws.tabs) return [];
+    return ws.tabs
+      .filter(tab => selectedTabs.has(`${workspaceId}:${tab.id}`))
+      .map(tab => tab.id);
   }
 
   /**
@@ -936,17 +983,35 @@
   // ==================== 拖拽排序与跨区移动 ====================
 
   // 当前正在拖拽的标签页信息
+  // 单条模式：{ mode: 'single', tabId, workspaceId }
+  // 批量模式：{ mode: 'batch', tabIds: string[], workspaceId }
   let draggedTabInfo = null;
 
   /**
    * 标签页拖拽开始
+   * 若被拖拽项已选中，则批量拖拽该工作区下所有选中标签页；否则为单条拖拽
    */
   function handleTabDragStart(event) {
     const item = event.currentTarget;
-    draggedTabInfo = {
-      tabId: item.dataset.tabId,
-      workspaceId: item.dataset.workspaceId
-    };
+    const workspaceId = item.dataset.workspaceId;
+    const tabId = item.dataset.tabId;
+    const isSelected = selectedTabs.has(`${workspaceId}:${tabId}`);
+
+    if (isSelected) {
+      const selectedTabIds = getSelectedTabIdsForWorkspace(workspaceId);
+      draggedTabInfo = {
+        mode: 'batch',
+        tabIds: selectedTabIds,
+        workspaceId
+      };
+    } else {
+      draggedTabInfo = {
+        mode: 'single',
+        tabId,
+        workspaceId
+      };
+    }
+
     event.dataTransfer.effectAllowed = 'move';
     event.dataTransfer.setData('text/plain', JSON.stringify(draggedTabInfo));
     item.classList.add('dragging');
@@ -980,8 +1045,8 @@
     const tabList = event.currentTarget;
     const targetWorkspaceId = tabList.dataset.workspaceId;
 
-    // 仅允许在同工作区内排序
-    if (targetWorkspaceId !== draggedTabInfo.workspaceId) return;
+    // 仅允许在同工作区内单条排序；批量拖拽不支持同工作区排序
+    if (targetWorkspaceId !== draggedTabInfo.workspaceId || draggedTabInfo.mode === 'batch') return;
 
     const afterElement = getDragAfterElement(tabList, event.clientY);
     const indicator = getOrCreateDropIndicator();
@@ -1042,8 +1107,8 @@
     const tabList = event.currentTarget;
     const targetWorkspaceId = tabList.dataset.workspaceId;
 
-    // 仅处理同工作区排序
-    if (targetWorkspaceId !== draggedTabInfo.workspaceId) return;
+    // 仅处理同工作区单条排序；批量拖拽不支持同工作区排序
+    if (targetWorkspaceId !== draggedTabInfo.workspaceId || draggedTabInfo.mode === 'batch') return;
 
     const afterElement = getDragAfterElement(tabList, event.clientY);
     const children = [...tabList.querySelectorAll('.tab-item')];
@@ -1110,6 +1175,7 @@
 
   /**
    * 在工作区卡片上释放：执行跨工作区移动
+   * 支持单条移动与批量移动两种模式
    */
   async function handleWorkspaceDrop(event) {
     event.preventDefault();
@@ -1128,13 +1194,27 @@
     clearDropIndicators();
 
     try {
-      const response = await sendMessage({
-        type: 'MOVE_TAB',
-        tabId: draggedTabInfo.tabId,
-        sourceWorkspaceId: draggedTabInfo.workspaceId,
-        targetWorkspaceId
-      });
+      let response;
+      if (draggedTabInfo.mode === 'batch') {
+        const moves = draggedTabInfo.tabIds.map(tabId => ({
+          tabId,
+          sourceWorkspaceId: draggedTabInfo.workspaceId,
+          targetWorkspaceId
+        }));
+        response = await sendMessage({ type: 'MOVE_TABS', moves });
+      } else {
+        response = await sendMessage({
+          type: 'MOVE_TAB',
+          tabId: draggedTabInfo.tabId,
+          sourceWorkspaceId: draggedTabInfo.workspaceId,
+          targetWorkspaceId
+        });
+      }
       if (response && response.success) {
+        // 批量移动成功后清空选中状态，避免用户误操作
+        if (draggedTabInfo.mode === 'batch') {
+          selectedTabs.clear();
+        }
         await loadAndRender();
       } else {
         showError(response && response.error ? response.error : '移动标签页失败');
