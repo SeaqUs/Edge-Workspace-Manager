@@ -810,6 +810,32 @@
     console.log('[TEST_DEBUG] m2mCWindowAfter tabs', m2mCWindowAfter.tabs.map(t => t.url));
     assert(m2mCWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://m2m-c1.example.com')).length === 0, '多对多 C 窗口中 c1 已关闭');
 
+    // 模拟面板显示数据验证：根据 popup.js 的渲染逻辑，面板会读取 workspaceData 并展示工作区名称、标签页列表与打开状态
+    const m2mDataForPanel = await loadWorkspaces();
+    const m2mAPanel = m2mDataForPanel.workspaces.find(w => w.id === m2mAFresh.id);
+    const m2mBPanel = m2mDataForPanel.workspaces.find(w => w.id === m2mBFresh.id);
+    const m2mCPanel = m2mDataForPanel.workspaces.find(w => w.id === m2mCFresh.id);
+
+    // A 工作区：原 a1 移出到 B，c1 从 C 移入；面板应显示 a2 与 c1
+    assert(m2mAPanel.windowId === m2mAWindow.id, '面板：A 工作区关联到原 A 窗口');
+    assert(m2mAPanel.tabs.length === 2, '面板：A 工作区显示 2 个标签页');
+    assert(m2mAPanel.tabs.some(t => t.url === 'https://m2m-a2.example.com'), '面板：A 工作区显示保留标签页 a2');
+    assert(m2mAPanel.tabs.some(t => t.url === 'https://m2m-c1.example.com'), '面板：A 工作区显示移入标签页 c1');
+    assert(!m2mAPanel.tabs.some(t => t.url === 'https://m2m-a1.example.com'), '面板：A 工作区不再显示已移出的 a1');
+    assert(m2mAPanel.pendingCleanup === undefined, '面板：A 工作区 pendingCleanup 已清除');
+
+    // B 工作区：原 b1 保留，a1 从 A 移入；面板应显示 b1 与 a1
+    assert(m2mBPanel.windowId === m2mBWindow.id, '面板：B 工作区关联到原 B 窗口');
+    assert(m2mBPanel.tabs.length === 2, '面板：B 工作区显示 2 个标签页');
+    assert(m2mBPanel.tabs.some(t => t.url === 'https://m2m-b1.example.com'), '面板：B 工作区显示保留标签页 b1');
+    assert(m2mBPanel.tabs.some(t => t.url === 'https://m2m-a1.example.com'), '面板：B 工作区显示移入标签页 a1');
+    assert(m2mBPanel.pendingCleanup === undefined, '面板：B 工作区 pendingCleanup 已清除');
+
+    // C 工作区：原 c1 移出到 A；面板应显示为空
+    assert(m2mCPanel.windowId === m2mCWindow.id, '面板：C 工作区关联到原 C 窗口');
+    assert(m2mCPanel.tabs.length === 0, '面板：C 工作区显示 0 个标签页');
+    assert(m2mCPanel.pendingCleanup === undefined, '面板：C 工作区 pendingCleanup 已清除');
+
     // 测试 34：多对多边界 - A 仅含一个被移出的标签页且不含任何保留标签页，A 窗口仅含该移出 URL
     await saveWorkspaces({ version: '1.0.0', workspaces: [] });
     await clearPendingOperations();

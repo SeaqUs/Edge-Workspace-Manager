@@ -115,6 +115,10 @@ function calculateWindowMatchScore(chromeWindow, ws, includePendingCleanup = fal
   const windowUrls = chromeWindow.tabs.map(t => normalizeUrl(t.url)).filter(Boolean);
   let wsUrls = (ws.tabs || []).map(t => normalizeUrl(t.url)).filter(Boolean);
 
+  console.log(`[calculateWindowMatchScore] 开始匹配: 窗口=${chromeWindow.id}, 工作区=${ws.id}, includePendingCleanup=${includePendingCleanup}`);
+  console.log(`[calculateWindowMatchScore] 窗口 URL 列表:`, windowUrls);
+  console.log(`[calculateWindowMatchScore] 工作区原始 URL 列表:`, wsUrls);
+
   // 当提供全局工作区列表时，若当前工作区本身没有待清理 URL，
   // 则从当前工作区的匹配 URL 中排除"属于其他源工作区、且目标不是当前工作区"的 URL。
   // 这样可以避免目标工作区用刚移入的标签页去抢占源工作区窗口，
@@ -133,6 +137,7 @@ function calculateWindowMatchScore(chromeWindow, ws, includePendingCleanup = fal
       }
     });
     wsUrls = wsUrls.filter(url => !cleanupUrlsFromOthers.has(url));
+    console.log(`[calculateWindowMatchScore] 排除其他源待清理 URL 后:`, wsUrls, `排除集合:`, Array.from(cleanupUrlsFromOthers));
   }
 
   // 仅在明确需要时把待清理 URL 纳入匹配，帮助识别原窗口
@@ -155,10 +160,12 @@ function calculateWindowMatchScore(chromeWindow, ws, includePendingCleanup = fal
         }
       });
       wsUrls = wsUrls.filter(url => !movedInUrls.has(url));
+      console.log(`[calculateWindowMatchScore] 排除移入当前工作区的 URL 后:`, wsUrls, `移入集合:`, Array.from(movedInUrls));
     }
 
     const cleanupItems = getPendingCleanupItems(ws);
     const cleanupUrls = cleanupItems.map(item => normalizeUrl(item.url)).filter(Boolean);
+    console.log(`[calculateWindowMatchScore] 当前工作区待清理 URL 列表:`, cleanupUrls);
 
     if (cleanupUrls.length > 0) {
       const windowUrlSet = new Set(windowUrls);
@@ -178,10 +185,15 @@ function calculateWindowMatchScore(chromeWindow, ws, includePendingCleanup = fal
     }
   }
 
-  if (windowUrls.length === 0 || wsUrls.length === 0) return 0;
+  if (windowUrls.length === 0 || wsUrls.length === 0) {
+    console.log(`[calculateWindowMatchScore] 窗口或工作区无有效 URL，匹配失败: 窗口=${chromeWindow.id}, 工作区=${ws.id}`);
+    return 0;
+  }
 
   const matched = windowUrls.filter(url => wsUrls.includes(url)).length;
-  return matched / Math.max(windowUrls.length, wsUrls.length);
+  const score = matched / Math.max(windowUrls.length, wsUrls.length);
+  console.log(`[calculateWindowMatchScore] 匹配结果: 窗口=${chromeWindow.id}, 工作区=${ws.id}, 匹配数=${matched}, 最终分数=${score.toFixed(4)}`);
+  return score;
 }
 
 /**
@@ -712,6 +724,7 @@ async function moveTabToWorkspace(tabId, sourceWorkspaceId, targetWorkspaceId) {
     }
     sourceWs.pendingCleanup.urls.push({ url: movedTab.url, targetWorkspaceId: targetWorkspaceId });
     sourceWs.pendingCleanup.createdAt = nowIso();
+    console.log(`[moveTabToWorkspace] 源工作区 ${sourceWs.id} 待清理项更新:`, sourceWs.pendingCleanup);
     if (!(await hasPendingOperations(sourceWorkspaceId))) {
       await queuePendingOperation(sourceWorkspaceId, 'SYNC', { reason: 'tabs_moved_out' });
     }
@@ -836,6 +849,7 @@ async function moveTabsToWorkspaces(moves) {
         }
         sourceWs.pendingCleanup.urls.push({ url: tab.url, targetWorkspaceId: move.targetWorkspaceId });
         sourceWs.pendingCleanup.createdAt = nowIso();
+        console.log(`[moveTabsToWorkspaces] 源工作区 ${sourceWs.id} 待清理项更新:`, sourceWs.pendingCleanup);
       }
 
       // 目标窗口未打开时，仅入队一次 OPEN 意图
