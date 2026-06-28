@@ -36,6 +36,20 @@
   }
 
   /**
+   * 清理所有已打开的浏览器窗口，避免历史窗口影响后续 scanOpenWindowsAndAssociate 性能
+   */
+  async function clearAllWindows() {
+    const allWindows = await chrome.windows.getAll({ populate: true });
+    for (const win of allWindows) {
+      try {
+        await chrome.windows.remove(win.id);
+      } catch (e) {
+        // 忽略清理失败
+      }
+    }
+  }
+
+  /**
    * 运行所有测试
    */
   async function runTests() {
@@ -891,6 +905,7 @@
     assert(edgeCWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://edge-c1.example.com')).length === 0, '边界 C 窗口中 c1 已关闭');
 
     // 测试 35：大样本一对多 - 1 个源工作区移动 5 个标签页到 5 个不同目标工作区
+    await clearAllWindows();
     await saveWorkspaces({ version: '1.0.0', workspaces: [] });
     await clearPendingOperations();
     const largeSource = await createWorkspace('大样本一对多源');
@@ -966,6 +981,7 @@
     assert(largeSourceFinal.pendingCleanup === undefined, '大样本一对多源工作区 pendingCleanup 已清除');
 
     // 测试 36：大样本多对一 - 5 个源工作区各移动 1 个标签页到同一个目标工作区
+    await clearAllWindows();
     await saveWorkspaces({ version: '1.0.0', workspaces: [] });
     await clearPendingOperations();
     const largeSources = [];
@@ -1033,6 +1049,7 @@
     }
 
     // 测试 37：大样本多对多 - 3 个工作区互相移动，均既是源又是目标
+    await clearAllWindows();
     await saveWorkspaces({ version: '1.0.0', workspaces: [] });
     await clearPendingOperations();
     const largeM2mA = await createWorkspace('大样本多对多 A');
@@ -1122,6 +1139,283 @@
     assert(largeM2mAFinal.pendingCleanup === undefined, '大样本多对多 A pendingCleanup 已清除');
     assert(largeM2mBFinal.pendingCleanup === undefined, '大样本多对多 B pendingCleanup 已清除');
     assert(largeM2mCFinal.pendingCleanup === undefined, '大样本多对多 C pendingCleanup 已清除');
+
+    // 测试 38：2 源 7 目标随机移动
+    await clearAllWindows();
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    await clearPendingOperations();
+    const perfSourceA = await createWorkspace('性能测试源 A');
+    const perfSourceB = await createWorkspace('性能测试源 B');
+    const perfTargets = [];
+    for (let i = 1; i <= 7; i++) {
+      perfTargets.push(await createWorkspace(`性能测试目标 ${i}`));
+    }
+
+    // 为每个源工作区创建 10 个标签页
+    const perfSourceAPages = [];
+    const perfSourceBPages = [];
+    for (let i = 1; i <= 10; i++) {
+      perfSourceAPages.push(await addTabToWorkspace(perfSourceA.id, `https://perf38-a${i}.example.com`, `Perf38 A${i}`));
+      perfSourceBPages.push(await addTabToWorkspace(perfSourceB.id, `https://perf38-b${i}.example.com`, `Perf38 B${i}`));
+    }
+
+    const perfDataBefore = await loadWorkspaces();
+    const perfSourceAFresh = perfDataBefore.workspaces.find(w => w.id === perfSourceA.id);
+    const perfSourceBFresh = perfDataBefore.workspaces.find(w => w.id === perfSourceB.id);
+    const perfTargetFreshs = perfTargets.map(t => perfDataBefore.workspaces.find(w => w.id === t.id));
+    [perfSourceAFresh, perfSourceBFresh, ...perfTargetFreshs].forEach(ws => {
+      ws.windowId = null;
+      ws.tabs.forEach(tab => delete tab.realTabId);
+    });
+    await saveWorkspaces({ version: '1.0.0', workspaces: [perfSourceAFresh, perfSourceBFresh, ...perfTargetFreshs] });
+
+    // 随机移动：从 A 和 B 中各随机选 7 个标签页，随机分配到 7 个目标
+    const perf38Moves = [];
+    const shuffledAPages = perfSourceAPages.sort(() => Math.random() - 0.5).slice(0, 7);
+    const shuffledBPages = perfSourceBPages.sort(() => Math.random() - 0.5).slice(0, 7);
+    for (let i = 0; i < 7; i++) {
+      perf38Moves.push({ tabId: shuffledAPages[i].id, sourceWorkspaceId: perfSourceAFresh.id, targetWorkspaceId: perfTargetFreshs[i].id });
+      perf38Moves.push({ tabId: shuffledBPages[i].id, sourceWorkspaceId: perfSourceBFresh.id, targetWorkspaceId: perfTargetFreshs[(i + 3) % 7].id });
+    }
+
+    console.log('[TEST_PERF] 测试38开始，移动数量', perf38Moves.length);
+    const perf38Start = performance.now();
+    assert(await moveTabsToWorkspaces(perf38Moves) === true, '性能测试 2 源 7 目标随机移动成功');
+    console.log('[TEST_PERF] 测试38 moveTabsToWorkspaces 完成，耗时', (performance.now() - perf38Start).toFixed(2), 'ms');
+
+    const perf38DataAfterMove = await loadWorkspaces();
+    const perf38SourceAAfter = perf38DataAfterMove.workspaces.find(w => w.id === perfSourceAFresh.id);
+    const perf38SourceBAfter = perf38DataAfterMove.workspaces.find(w => w.id === perfSourceBFresh.id);
+    assert(perf38SourceAAfter.tabs.length === 3, '测试38 源 A 剩余 3 个标签页');
+    assert(perf38SourceBAfter.tabs.length === 3, '测试38 源 B 剩余 3 个标签页');
+    for (let i = 0; i < 7; i++) {
+      const target = perf38DataAfterMove.workspaces.find(w => w.id === perfTargetFreshs[i].id);
+      assert(target.tabs.length === 2, `测试38 目标 ${i + 1} 包含 2 个标签页`);
+    }
+
+    // 模拟窗口
+    const perf38SourceWindowA = await chrome.windows.create({ url: perf38SourceAAfter.tabs.map(t => t.url), focused: false });
+    const perf38SourceWindowB = await chrome.windows.create({ url: perf38SourceBAfter.tabs.map(t => t.url), focused: false });
+    const perf38TargetWindows = [];
+    for (let i = 0; i < 7; i++) {
+      const target = perf38DataAfterMove.workspaces.find(w => w.id === perfTargetFreshs[i].id);
+      perf38TargetWindows.push(await chrome.windows.create({ url: target.tabs.map(t => t.url), focused: false }));
+    }
+
+    const perf38ScanStart = performance.now();
+    const perf38ScanResult = await scanOpenWindowsAndAssociate();
+    console.log('[TEST_PERF] 测试38 scanOpenWindowsAndAssociate 完成，耗时', (performance.now() - perf38ScanStart).toFixed(2), 'ms');
+    assert(perf38ScanResult.associated >= 9, '测试38 扫描至少关联 9 个工作区');
+
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    // 验证源窗口中移出的标签页已关闭
+    const perf38SourceWindowAAfter = await chrome.windows.get(perf38SourceWindowA.id, { populate: true });
+    for (const page of shuffledAPages) {
+      assert(perf38SourceWindowAAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl(page.url)).length === 0, `测试38 源 A 窗口中 ${page.url} 已关闭`);
+    }
+    const perf38SourceWindowBAfter = await chrome.windows.get(perf38SourceWindowB.id, { populate: true });
+    for (const page of shuffledBPages) {
+      assert(perf38SourceWindowBAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl(page.url)).length === 0, `测试38 源 B 窗口中 ${page.url} 已关闭`);
+    }
+
+    // 验证目标窗口
+    for (let i = 0; i < 7; i++) {
+      const targetWindowAfter = await chrome.windows.get(perf38TargetWindows[i].id, { populate: true });
+      const target = perf38DataAfterMove.workspaces.find(w => w.id === perfTargetFreshs[i].id);
+      for (const tab of target.tabs) {
+        assert(targetWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl(tab.url)).length === 1, `测试38 目标 ${i + 1} 窗口包含 ${tab.url}`);
+      }
+    }
+
+    // 测试 39：13 源 1 目标，每个源移动数量不同
+    await clearAllWindows();
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    await clearPendingOperations();
+    const perf39Sources = [];
+    for (let i = 1; i <= 13; i++) {
+      perf39Sources.push(await createWorkspace(`性能测试39源 ${i}`));
+    }
+    const perf39Target = await createWorkspace('性能测试39目标');
+
+    const perf39SourcePages = [];
+    for (let i = 0; i < 13; i++) {
+      const pages = [];
+      for (let j = 1; j <= i + 1; j++) {
+        pages.push(await addTabToWorkspace(perf39Sources[i].id, `https://perf39-s${i + 1}-p${j}.example.com`, `Perf39 S${i + 1} P${j}`));
+      }
+      perf39SourcePages.push(pages);
+    }
+
+    const perf39DataBefore = await loadWorkspaces();
+    const perf39SourceFreshs = perf39Sources.map(s => perf39DataBefore.workspaces.find(w => w.id === s.id));
+    const perf39TargetFresh = perf39DataBefore.workspaces.find(w => w.id === perf39Target.id);
+    perf39SourceFreshs.forEach(ws => {
+      ws.windowId = null;
+      ws.tabs.forEach(tab => delete tab.realTabId);
+    });
+    perf39TargetFresh.windowId = null;
+    perf39TargetFresh.tabs.forEach(tab => delete tab.realTabId);
+    await saveWorkspaces({ version: '1.0.0', workspaces: [...perf39SourceFreshs, perf39TargetFresh] });
+
+    const perf39Moves = [];
+    for (let i = 0; i < 13; i++) {
+      for (const page of perf39SourcePages[i]) {
+        perf39Moves.push({ tabId: page.id, sourceWorkspaceId: perf39SourceFreshs[i].id, targetWorkspaceId: perf39TargetFresh.id });
+      }
+    }
+
+    console.log('[TEST_PERF] 测试39开始，移动数量', perf39Moves.length);
+    const perf39Start = performance.now();
+    assert(await moveTabsToWorkspaces(perf39Moves) === true, '性能测试 13 源 1 目标移动成功');
+    console.log('[TEST_PERF] 测试39 moveTabsToWorkspaces 完成，耗时', (performance.now() - perf39Start).toFixed(2), 'ms');
+
+    const perf39DataAfterMove = await loadWorkspaces();
+    const perf39TargetAfter = perf39DataAfterMove.workspaces.find(w => w.id === perf39TargetFresh.id);
+    assert(perf39TargetAfter.tabs.length === 91, '测试39 目标工作区包含 91 个标签页');
+    for (let i = 0; i < 13; i++) {
+      const source = perf39DataAfterMove.workspaces.find(w => w.id === perf39SourceFreshs[i].id);
+      assert(source.tabs.length === 0, `测试39 源 ${i + 1} 为空`);
+    }
+
+    // 模拟窗口
+    const perf39SourceWindows = [];
+    for (let i = 0; i < 13; i++) {
+      perf39SourceWindows.push(await chrome.windows.create({ url: perf39SourcePages[i].map(p => p.url), focused: false }));
+    }
+    const perf39TargetWindow = await chrome.windows.create({ url: perf39TargetAfter.tabs.map(t => t.url), focused: false });
+
+    const perf39ScanStart = performance.now();
+    const perf39ScanResult = await scanOpenWindowsAndAssociate();
+    console.log('[TEST_PERF] 测试39 scanOpenWindowsAndAssociate 完成，耗时', (performance.now() - perf39ScanStart).toFixed(2), 'ms');
+    assert(perf39ScanResult.associated >= 14, '测试39 扫描至少关联 14 个工作区');
+
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    // 验证源窗口中移出的标签页已关闭
+    for (let i = 0; i < 13; i++) {
+      const sourceWindowAfter = await chrome.windows.get(perf39SourceWindows[i].id, { populate: true });
+      assert(sourceWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl(`https://perf39-s${i + 1}-p1.example.com`)).length === 0, `测试39 源 ${i + 1} 窗口中标签页已关闭`);
+    }
+
+    // 验证目标窗口包含所有 91 个标签页
+    const perf39TargetWindowAfter = await chrome.windows.get(perf39TargetWindow.id, { populate: true });
+    for (let i = 0; i < 13; i++) {
+      for (const page of perf39SourcePages[i]) {
+        assert(perf39TargetWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl(page.url)).length === 1, `测试39 目标窗口包含 ${page.url}`);
+      }
+    }
+
+    // 测试 40：31 工作区随机移动，总共不少于 100 个标签页，每个工作区都有操作
+    await clearAllWindows();
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    await clearPendingOperations();
+    const perf40Workspaces = [];
+    for (let i = 1; i <= 31; i++) {
+      perf40Workspaces.push(await createWorkspace(`性能测试40工作区 ${i}`));
+    }
+
+    // 为每个工作区创建 5 个标签页
+    const perf40Pages = [];
+    for (let i = 0; i < 31; i++) {
+      const pages = [];
+      for (let j = 1; j <= 5; j++) {
+        pages.push(await addTabToWorkspace(perf40Workspaces[i].id, `https://perf40-w${i + 1}-p${j}.example.com`, `Perf40 W${i + 1} P${j}`));
+      }
+      perf40Pages.push(pages);
+    }
+
+    const perf40DataBefore = await loadWorkspaces();
+    const perf40WorkspaceFreshs = perf40Workspaces.map(w => perf40DataBefore.workspaces.find(ws => ws.id === w.id));
+    perf40WorkspaceFreshs.forEach(ws => {
+      ws.windowId = null;
+      ws.tabs.forEach(tab => delete tab.realTabId);
+    });
+    await saveWorkspaces({ version: '1.0.0', workspaces: perf40WorkspaceFreshs });
+
+    // 生成随机移动计划：确保每个工作区至少移出或移入一次，总移动数 >= 100
+    const perf40Moves = [];
+    const involvedWorkspaceIds = new Set();
+    // 记录每个源工作区已移出的标签页索引集合
+    const movedOutTabIdsBySource = new Array(31).fill(null).map(() => new Set());
+
+    // 先为每个工作区生成至少一次移出操作
+    for (let i = 0; i < 31; i++) {
+      const sourceIdx = i;
+      const targetIdx = (i + 1) % 31;
+      const page = perf40Pages[sourceIdx][0];
+      perf40Moves.push({ tabId: page.id, sourceWorkspaceId: perf40WorkspaceFreshs[sourceIdx].id, targetWorkspaceId: perf40WorkspaceFreshs[targetIdx].id });
+      involvedWorkspaceIds.add(perf40WorkspaceFreshs[sourceIdx].id);
+      involvedWorkspaceIds.add(perf40WorkspaceFreshs[targetIdx].id);
+      movedOutTabIdsBySource[sourceIdx].add(page.id);
+    }
+
+    // 再随机补充移动，直到总移动数 >= 100，且每个源工作区至少保留 1 个标签页
+    let moveIdCounter = 0;
+    while (perf40Moves.length < 100) {
+      const sourceIdx = Math.floor(Math.random() * 31);
+      const targetIdx = Math.floor(Math.random() * 31);
+      if (sourceIdx === targetIdx) continue;
+
+      // 源工作区最多移出 4 个标签页，保留至少 1 个
+      if (movedOutTabIdsBySource[sourceIdx].size >= 4) continue;
+
+      // 从源工作区中选择一个尚未被移出的标签页
+      const sourcePages = perf40Pages[sourceIdx];
+      const availablePages = sourcePages.filter(p => !movedOutTabIdsBySource[sourceIdx].has(p.id));
+      if (availablePages.length === 0) continue;
+      const page = availablePages[Math.floor(Math.random() * availablePages.length)];
+
+      perf40Moves.push({ tabId: page.id, sourceWorkspaceId: perf40WorkspaceFreshs[sourceIdx].id, targetWorkspaceId: perf40WorkspaceFreshs[targetIdx].id });
+      involvedWorkspaceIds.add(perf40WorkspaceFreshs[sourceIdx].id);
+      involvedWorkspaceIds.add(perf40WorkspaceFreshs[targetIdx].id);
+      movedOutTabIdsBySource[sourceIdx].add(page.id);
+      moveIdCounter++;
+      if (moveIdCounter > 500) break; // 防止死循环
+    }
+
+    console.log('[TEST_PERF] 测试40开始，工作区数 31，移动数量', perf40Moves.length);
+    const perf40Start = performance.now();
+    assert(await moveTabsToWorkspaces(perf40Moves) === true, '性能测试 31 工作区随机移动成功');
+    console.log('[TEST_PERF] 测试40 moveTabsToWorkspaces 完成，耗时', (performance.now() - perf40Start).toFixed(2), 'ms');
+
+    const perf40DataAfterMove = await loadWorkspaces();
+    assert(perf40DataAfterMove.workspaces.length === 31, '测试40 工作区总数仍为 31');
+    for (const ws of perf40DataAfterMove.workspaces) {
+      assert(involvedWorkspaceIds.has(ws.id), '测试40 每个工作区都参与了移动');
+    }
+
+    // 统计总移动标签页数
+    const totalMovedTabs = perf40Moves.length;
+    assert(totalMovedTabs >= 100, `测试40 总移动标签页数 ${totalMovedTabs} >= 100`);
+
+    // 模拟所有工作区窗口
+    const perf40Windows = [];
+    for (let i = 0; i < 31; i++) {
+      const ws = perf40DataAfterMove.workspaces.find(w => w.id === perf40WorkspaceFreshs[i].id);
+      const urls = ws.tabs.map(t => t.url);
+      if (urls.length === 0) {
+        urls.push('edge://newtab/');
+      }
+      perf40Windows.push(await chrome.windows.create({ url: urls, focused: false }));
+    }
+
+    const perf40ScanStart = performance.now();
+    const perf40ScanResult = await scanOpenWindowsAndAssociate();
+    console.log('[TEST_PERF] 测试40 scanOpenWindowsAndAssociate 完成，耗时', (performance.now() - perf40ScanStart).toFixed(2), 'ms');
+    assert(perf40ScanResult.associated >= 31, '测试40 扫描至少关联 31 个工作区');
+
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    // 验证每个工作区窗口中的标签页与影子数据一致
+    for (let i = 0; i < 31; i++) {
+      const ws = perf40DataAfterMove.workspaces.find(w => w.id === perf40WorkspaceFreshs[i].id);
+      const windowAfter = await chrome.windows.get(perf40Windows[i].id, { populate: true });
+      assert(windowAfter.tabs.length === ws.tabs.length, `测试40 工作区 ${i + 1} 窗口标签页数与影子数据一致`);
+      for (const tab of ws.tabs) {
+        assert(windowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl(tab.url)).length === 1, `测试40 工作区 ${i + 1} 窗口包含 ${tab.url}`);
+      }
+    }
 
     } catch (error) {
       log(`测试执行异常: ${error.message}`, 'fail');
