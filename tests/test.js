@@ -219,10 +219,12 @@
     assert(calculateWindowMatchScore(scoreWindow, scoreWsFull) === 1, '完全匹配返回 1');
     assert(calculateWindowMatchScore(scoreWindow, scoreWsPartial) === 0.5, '一半匹配返回 0.5');
 
-    // 测试 20：扫描已打开窗口并自动关联
+    // 测试 20：扫描已打开窗口并自动关联。
+    // 由于前面测试已关闭 windowA，当前仅剩 mock-chrome 初始窗口 B（https://www.bing.com），
+    // 因此为扫描工作区添加匹配 windowB 的标签页。
     await saveWorkspaces({ version: '1.0.0', workspaces: [] });
     const scanWs = await createWorkspace('扫描匹配工作区');
-    await addTabToWorkspace(scanWs.id, 'https://github.com', 'GitHub');
+    await addTabToWorkspace(scanWs.id, 'https://www.bing.com', 'Bing');
 
     const scanResult = await scanOpenWindowsAndAssociate();
     assert(scanResult.associated >= 1, 'scanOpenWindowsAndAssociate 至少关联 1 个窗口');
@@ -1416,6 +1418,60 @@
         assert(windowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl(tab.url)).length === 1, `测试40 工作区 ${i + 1} 窗口包含 ${tab.url}`);
       }
     }
+
+    // 测试 41：模拟 Edge 原生工作区分次打开 - 先从 B 移出两个标签页到 A 和 C，然后只打开 A
+    await clearAllWindows();
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    await clearPendingOperations();
+    const nativeA = await createWorkspace('原生 A');
+    const nativeB = await createWorkspace('原生 B');
+    const nativeC = await createWorkspace('原生 C');
+    const nativeAOriginal = await addTabToWorkspace(nativeA.id, 'https://native-a.example.com', 'Native A');
+    const nativeBTab1 = await addTabToWorkspace(nativeB.id, 'https://native-b1.example.com', 'Native B1');
+    const nativeBTab2 = await addTabToWorkspace(nativeB.id, 'https://native-b2.example.com', 'Native B2');
+    const nativeCOriginal = await addTabToWorkspace(nativeC.id, 'https://native-c.example.com', 'Native C');
+
+    const nativeDataBefore = await loadWorkspaces();
+    const nativeAFresh = nativeDataBefore.workspaces.find(w => w.id === nativeA.id);
+    const nativeBFresh = nativeDataBefore.workspaces.find(w => w.id === nativeB.id);
+    const nativeCFresh = nativeDataBefore.workspaces.find(w => w.id === nativeC.id);
+    [nativeAFresh, nativeBFresh, nativeCFresh].forEach(ws => {
+      ws.windowId = null;
+      ws.tabs.forEach(tab => delete tab.realTabId);
+    });
+    await saveWorkspaces({ version: '1.0.0', workspaces: [nativeAFresh, nativeBFresh, nativeCFresh] });
+
+    const nativeMoves = [
+      { tabId: nativeBTab1.id, sourceWorkspaceId: nativeBFresh.id, targetWorkspaceId: nativeAFresh.id },
+      { tabId: nativeBTab2.id, sourceWorkspaceId: nativeBFresh.id, targetWorkspaceId: nativeCFresh.id }
+    ];
+    assert(await moveTabsToWorkspaces(nativeMoves) === true, '原生场景批量移动成功');
+
+    // 模拟 Edge 原生只打开工作区 A：窗口仅包含 A 的原始标签页（不含已移入的 b1）
+    const nativeAWindow = await chrome.windows.create({ url: ['https://native-a.example.com'], focused: false });
+
+    // 等待窗口创建监听器（500ms）和焦点扫描监听器（300ms）完成
+    await new Promise(resolve => setTimeout(resolve, 700));
+
+    const nativeOnlyScanResult = await scanOpenWindowsAndAssociate();
+    console.log('[TEST_DEBUG] native scan associated', nativeOnlyScanResult.associated);
+    assert(nativeOnlyScanResult.associated >= 1, '原生场景扫描至少关联 1 个工作区');
+
+    await new Promise(resolve => setTimeout(resolve, 200));
+
+    const nativeAWindowAfter = await chrome.windows.get(nativeAWindow.id, { populate: true });
+    console.log('[TEST_DEBUG] nativeAWindowAfter tabs', nativeAWindowAfter.tabs.map(t => t.url));
+    assert(nativeAWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://native-a.example.com')).length === 1, '原生 A 窗口保留原 a');
+    assert(nativeAWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://native-b1.example.com')).length === 1, '原生 A 窗口恰好有 1 个 b1');
+    assert(nativeAWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://native-c.example.com')).length === 0, '原生 A 窗口不含 C 的原标签页');
+
+    const nativeOnlyDataFinal = await loadWorkspaces();
+    const nativeAFinal = nativeOnlyDataFinal.workspaces.find(w => w.id === nativeAFresh.id);
+    const nativeBFinal = nativeOnlyDataFinal.workspaces.find(w => w.id === nativeBFresh.id);
+    const nativeCFinal = nativeOnlyDataFinal.workspaces.find(w => w.id === nativeCFresh.id);
+    assert(nativeAFinal.windowId === nativeAWindow.id, '原生 A 工作区关联到 A 窗口');
+    assert(nativeBFinal.windowId === null, '原生 B 工作区未关联（未打开）');
+    assert(nativeCFinal.windowId === null, '原生 C 工作区未关联（未打开）');
 
     } catch (error) {
       log(`测试执行异常: ${error.message}`, 'fail');

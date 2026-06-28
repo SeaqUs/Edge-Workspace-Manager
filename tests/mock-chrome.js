@@ -167,6 +167,12 @@
       }
     },
 
+    action: {
+      onClicked: {
+        addListener() {}
+      }
+    },
+
     windows: {
       create(options) {
         const windowId = nextWindowId++;

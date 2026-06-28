@@ -253,6 +253,14 @@ async function tryAssociateWindowWithWorkspace(chromeWindow) {
 
   const associateStartTime = performance.now();
   const data = await loadWorkspaces();
+
+  // 若窗口已与其他工作区关联，则不再尝试重新关联，避免多个工作区绑定同一窗口。
+  const associatedWindowIds = new Set(data.workspaces.map(ws => ws.windowId).filter(Boolean));
+  if (associatedWindowIds.has(chromeWindow.id)) {
+    console.log(`[tryAssociateWindowWithWorkspace] 窗口 ${chromeWindow.id} 已关联其他工作区，跳过`);
+    return false;
+  }
+
   const windowUrls = chromeWindow.tabs.map(t => normalizeUrl(t.url)).filter(Boolean);
   if (windowUrls.length === 0) return false;
 
@@ -325,7 +333,10 @@ async function scanOpenWindowsAndAssociate() {
     }
 
     const allWindows = await chrome.windows.getAll({ populate: true });
-    const normalWindows = allWindows.filter(w => w.type === 'normal' && w.tabs && w.tabs.length > 0);
+    // 排除已与其他工作区关联的窗口，避免未关联工作区抢占已有窗口，
+    // 这在多工作区移入/移出后分次打开时尤为重要。
+    const associatedWindowIds = new Set(data.workspaces.map(ws => ws.windowId).filter(Boolean));
+    const normalWindows = allWindows.filter(w => w.type === 'normal' && w.tabs && w.tabs.length > 0 && !associatedWindowIds.has(w.id));
 
     let associatedCount = 0;
     const matchedWindowIds = new Set();
