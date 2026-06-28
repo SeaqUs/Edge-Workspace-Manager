@@ -115,9 +115,13 @@ function calculateWindowMatchScore(chromeWindow, ws, includePendingCleanup = fal
   const windowUrls = chromeWindow.tabs.map(t => normalizeUrl(t.url)).filter(Boolean);
   let wsUrls = (ws.tabs || []).map(t => normalizeUrl(t.url)).filter(Boolean);
 
-  console.log(`[calculateWindowMatchScore] 开始匹配: 窗口=${chromeWindow.id}, 工作区=${ws.id}, includePendingCleanup=${includePendingCleanup}`);
-  console.log(`[calculateWindowMatchScore] 窗口 URL 列表:`, windowUrls);
-  console.log(`[calculateWindowMatchScore] 工作区原始 URL 列表:`, wsUrls);
+  const logPayload = {
+    windowId: chromeWindow.id,
+    workspaceId: ws.id,
+    includePendingCleanup,
+    windowUrls,
+    originalWsUrls: wsUrls
+  };
 
   // 当提供全局工作区列表时，若当前工作区本身没有待清理 URL，
   // 则从当前工作区的匹配 URL 中排除"属于其他源工作区、且目标不是当前工作区"的 URL。
@@ -137,7 +141,7 @@ function calculateWindowMatchScore(chromeWindow, ws, includePendingCleanup = fal
       }
     });
     wsUrls = wsUrls.filter(url => !cleanupUrlsFromOthers.has(url));
-    console.log(`[calculateWindowMatchScore] 排除其他源待清理 URL 后:`, wsUrls, `排除集合:`, Array.from(cleanupUrlsFromOthers));
+    logPayload.excludedCleanupUrls = Array.from(cleanupUrlsFromOthers);
   }
 
   // 仅在明确需要时把待清理 URL 纳入匹配，帮助识别原窗口
@@ -160,25 +164,33 @@ function calculateWindowMatchScore(chromeWindow, ws, includePendingCleanup = fal
         }
       });
       wsUrls = wsUrls.filter(url => !movedInUrls.has(url));
-      console.log(`[calculateWindowMatchScore] 排除移入当前工作区的 URL 后:`, wsUrls, `移入集合:`, Array.from(movedInUrls));
+      logPayload.movedInUrls = Array.from(movedInUrls);
     }
 
     const cleanupItems = getPendingCleanupItems(ws);
     const cleanupUrls = cleanupItems.map(item => normalizeUrl(item.url)).filter(Boolean);
-    console.log(`[calculateWindowMatchScore] 当前工作区待清理 URL 列表:`, cleanupUrls);
+    logPayload.cleanupUrls = cleanupUrls;
 
     if (cleanupUrls.length > 0) {
       const windowUrlSet = new Set(windowUrls);
       // 源工作区匹配时，要求窗口必须包含所有待清理 URL，
       // 避免只含部分移出标签页的窗口被错误关联为源窗口。
       const allCleanupMatched = cleanupUrls.every(url => windowUrlSet.has(url));
-      if (!allCleanupMatched) return 0;
+      if (!allCleanupMatched) {
+        logPayload.result = 'allCleanupNotMatched';
+        // // console.log('[calculateWindowMatchScore]', logPayload);
+        return 0;
+      }
 
       // 源工作区自身还有保留标签页时，要求窗口至少匹配到一个保留标签页，
       // 避免只含被移出 URL 的窗口被错认为源窗口。
       if (wsUrls.length > 0) {
         const hasMatchingTab = wsUrls.some(url => windowUrlSet.has(url));
-        if (!hasMatchingTab) return 0;
+        if (!hasMatchingTab) {
+          logPayload.result = 'noRetainedTabMatched';
+          // console.log('[calculateWindowMatchScore]', logPayload);
+          return 0;
+        }
       }
 
       wsUrls = wsUrls.concat(cleanupUrls);
@@ -186,13 +198,17 @@ function calculateWindowMatchScore(chromeWindow, ws, includePendingCleanup = fal
   }
 
   if (windowUrls.length === 0 || wsUrls.length === 0) {
-    console.log(`[calculateWindowMatchScore] 窗口或工作区无有效 URL，匹配失败: 窗口=${chromeWindow.id}, 工作区=${ws.id}`);
+    logPayload.result = 'emptyUrls';
+    // console.log('[calculateWindowMatchScore]', logPayload);
     return 0;
   }
 
   const matched = windowUrls.filter(url => wsUrls.includes(url)).length;
   const score = matched / Math.max(windowUrls.length, wsUrls.length);
-  console.log(`[calculateWindowMatchScore] 匹配结果: 窗口=${chromeWindow.id}, 工作区=${ws.id}, 匹配数=${matched}, 最终分数=${score.toFixed(4)}`);
+  logPayload.matchedCount = matched;
+  logPayload.score = score.toFixed(4);
+  logPayload.finalWsUrls = wsUrls;
+  // console.log('[calculateWindowMatchScore]', logPayload);
   return score;
 }
 

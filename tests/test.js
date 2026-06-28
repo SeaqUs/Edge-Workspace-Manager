@@ -39,10 +39,11 @@
    * 运行所有测试
    */
   async function runTests() {
-    log('开始运行测试...', '');
+    try {
+      log('开始运行测试...', '');
 
-    // 清理存储
-    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+      // 清理存储
+      await saveWorkspaces({ version: '1.0.0', workspaces: [] });
 
     // 测试 1：创建工作区
     const ws = await createWorkspace('测试工作区');
@@ -888,6 +889,244 @@
     const edgeCWindowAfter = await chrome.windows.get(edgeCWindow.id, { populate: true });
     console.log('[TEST_DEBUG] edgeCWindowAfter tabs', edgeCWindowAfter.tabs.map(t => t.url));
     assert(edgeCWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://edge-c1.example.com')).length === 0, '边界 C 窗口中 c1 已关闭');
+
+    // 测试 35：大样本一对多 - 1 个源工作区移动 5 个标签页到 5 个不同目标工作区
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    await clearPendingOperations();
+    const largeSource = await createWorkspace('大样本一对多源');
+    const largeTargets = [];
+    const largePages = [];
+    for (let i = 1; i <= 5; i++) {
+      largeTargets.push(await createWorkspace(`大样本一对多目标 ${i}`));
+      largePages.push(await addTabToWorkspace(largeSource.id, `https://large1-n${i}.example.com`, `Large 1-N${i}`));
+    }
+
+    const largeDataBefore = await loadWorkspaces();
+    const largeSourceFresh = largeDataBefore.workspaces.find(w => w.id === largeSource.id);
+    const largeTargetFreshs = largeTargets.map(t => largeDataBefore.workspaces.find(w => w.id === t.id));
+    largeSourceFresh.windowId = null;
+    largeSourceFresh.tabs.forEach(tab => delete tab.realTabId);
+    largeTargetFreshs.forEach(t => {
+      t.windowId = null;
+      t.tabs.forEach(tab => delete tab.realTabId);
+    });
+    await saveWorkspaces({ version: '1.0.0', workspaces: [largeSourceFresh, ...largeTargetFreshs] });
+
+    const largeOneToManyMoves = largePages.map((page, idx) => ({
+      tabId: page.id,
+      sourceWorkspaceId: largeSourceFresh.id,
+      targetWorkspaceId: largeTargetFreshs[idx].id
+    }));
+    assert(await moveTabsToWorkspaces(largeOneToManyMoves) === true, '大样本一对多批量移动成功');
+
+    const largeDataAfterMove = await loadWorkspaces();
+    const largeSourceAfterMove = largeDataAfterMove.workspaces.find(w => w.id === largeSourceFresh.id);
+    assert(largeSourceAfterMove.tabs.length === 0, '大样本一对多源工作区为空');
+    assert(largeSourceAfterMove.pendingCleanup && largeSourceAfterMove.pendingCleanup.urls.length === 5, '大样本一对多源工作区待清理 URL 为 5 个');
+    for (let i = 0; i < 5; i++) {
+      const target = largeDataAfterMove.workspaces.find(w => w.id === largeTargetFreshs[i].id);
+      assert(target.tabs.length === 1, `大样本一对多目标 ${i + 1} 有 1 个标签页`);
+      assert(target.tabs[0].url === `https://large1-n${i + 1}.example.com`, `大样本一对多目标 ${i + 1} 包含正确标签页`);
+    }
+
+    const largeSourceWindow = await chrome.windows.create({
+      url: largePages.map(p => p.url),
+      focused: false
+    });
+    const largeTargetWindows = [];
+    for (let i = 0; i < 5; i++) {
+      largeTargetWindows.push(await chrome.windows.create({ url: [largePages[i].url], focused: false }));
+    }
+
+    const largeScanResult = await scanOpenWindowsAndAssociate();
+    console.log('[TEST_DEBUG] large one-to-many scan associated', largeScanResult.associated);
+    assert(largeScanResult.associated >= 6, '大样本一对多扫描至少关联 6 个工作区');
+
+    console.log('[TEST_DEBUG] large one-to-many before setTimeout');
+    await new Promise(resolve => setTimeout(resolve, 100));
+    console.log('[TEST_DEBUG] large one-to-many after setTimeout');
+
+    console.log('[TEST_DEBUG] large one-to-many before get largeSourceWindow', largeSourceWindow.id);
+    const largeSourceWindowAfter = await chrome.windows.get(largeSourceWindow.id, { populate: true });
+    console.log('[TEST_DEBUG] large one-to-many after get largeSourceWindow', largeSourceWindowAfter);
+    console.log('[TEST_DEBUG] largeSourceWindowAfter tabs', largeSourceWindowAfter.tabs.map(t => t.url));
+    for (const page of largePages) {
+      assert(largeSourceWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl(page.url)).length === 0, `大样本一对多源窗口中 ${page.url} 已关闭`);
+    }
+
+    for (let i = 0; i < 5; i++) {
+      const targetWindowAfter = await chrome.windows.get(largeTargetWindows[i].id, { populate: true });
+      console.log(`[TEST_DEBUG] largeTargetWindowAfter ${i + 1} tabs`, targetWindowAfter.tabs.map(t => t.url));
+      assert(targetWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl(largePages[i].url)).length === 1, `大样本一对多目标 ${i + 1} 窗口中恰好有 1 个 ${largePages[i].url}`);
+    }
+
+    const largeDataFinal = await loadWorkspaces();
+    const largeSourceFinal = largeDataFinal.workspaces.find(w => w.id === largeSourceFresh.id);
+    assert(largeSourceFinal.tabs.length === 0, '大样本一对多源工作区最终为空');
+    assert(largeSourceFinal.pendingCleanup === undefined, '大样本一对多源工作区 pendingCleanup 已清除');
+
+    // 测试 36：大样本多对一 - 5 个源工作区各移动 1 个标签页到同一个目标工作区
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    await clearPendingOperations();
+    const largeSources = [];
+    const largeSourcePages = [];
+    for (let i = 1; i <= 5; i++) {
+      const ws = await createWorkspace(`大样本多对一源 ${i}`);
+      largeSources.push(ws);
+      largeSourcePages.push(await addTabToWorkspace(ws.id, `https://largem1-s${i}.example.com`, `Large M1-S${i}`));
+    }
+    const largeManyToOneTarget = await createWorkspace('大样本多对一目标');
+    await addTabToWorkspace(largeManyToOneTarget.id, 'https://largem1-base.example.com', 'Large M1 Base');
+
+    const largeM1DataBefore = await loadWorkspaces();
+    const largeM1SourceFreshs = largeSources.map(s => largeM1DataBefore.workspaces.find(w => w.id === s.id));
+    const largeM1TargetFresh = largeM1DataBefore.workspaces.find(w => w.id === largeManyToOneTarget.id);
+    largeM1SourceFreshs.forEach(s => {
+      s.windowId = null;
+      s.tabs.forEach(tab => delete tab.realTabId);
+    });
+    largeM1TargetFresh.windowId = null;
+    largeM1TargetFresh.tabs.forEach(tab => delete tab.realTabId);
+    await saveWorkspaces({ version: '1.0.0', workspaces: [...largeM1SourceFreshs, largeM1TargetFresh] });
+
+    const largeManyToOneMoves = largeSourcePages.map((page, idx) => ({
+      tabId: page.id,
+      sourceWorkspaceId: largeM1SourceFreshs[idx].id,
+      targetWorkspaceId: largeM1TargetFresh.id
+    }));
+    assert(await moveTabsToWorkspaces(largeManyToOneMoves) === true, '大样本多对一批量移动成功');
+
+    const largeM1DataAfterMove = await loadWorkspaces();
+    for (let i = 0; i < 5; i++) {
+      const source = largeM1DataAfterMove.workspaces.find(w => w.id === largeM1SourceFreshs[i].id);
+      assert(source.tabs.length === 0, `大样本多对一源 ${i + 1} 为空`);
+    }
+    const largeM1TargetAfterMove = largeM1DataAfterMove.workspaces.find(w => w.id === largeM1TargetFresh.id);
+    assert(largeM1TargetAfterMove.tabs.length === 6, '大样本多对一目标工作区包含 6 个标签页');
+    for (const page of largeSourcePages) {
+      assert(largeM1TargetAfterMove.tabs.some(t => t.url === page.url), `大样本多对一目标包含 ${page.url}`);
+    }
+
+    const largeM1SourceWindows = [];
+    for (let i = 0; i < 5; i++) {
+      largeM1SourceWindows.push(await chrome.windows.create({ url: [largeSourcePages[i].url], focused: false }));
+    }
+    const largeM1TargetWindow = await chrome.windows.create({ url: ['https://largem1-base.example.com', ...largeSourcePages.map(p => p.url)], focused: false });
+
+    const largeM1ScanResult = await scanOpenWindowsAndAssociate();
+    console.log('[TEST_DEBUG] large many-to-one scan associated', largeM1ScanResult.associated);
+    assert(largeM1ScanResult.associated >= 6, '大样本多对一扫描至少关联 6 个工作区');
+
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    for (let i = 0; i < 5; i++) {
+      const sourceWindowAfter = await chrome.windows.get(largeM1SourceWindows[i].id, { populate: true });
+      console.log(`[TEST_DEBUG] largeM1SourceWindowAfter ${i + 1} tabs`, sourceWindowAfter.tabs.map(t => t.url));
+      assert(sourceWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl(largeSourcePages[i].url)).length === 0, `大样本多对一源 ${i + 1} 窗口中标签页已关闭`);
+    }
+
+    const largeM1TargetWindowAfter = await chrome.windows.get(largeM1TargetWindow.id, { populate: true });
+    console.log('[TEST_DEBUG] largeM1TargetWindowAfter tabs', largeM1TargetWindowAfter.tabs.map(t => t.url));
+    assert(largeM1TargetWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://largem1-base.example.com')).length === 1, '大样本多对一目标窗口保留 base');
+    for (const page of largeSourcePages) {
+      assert(largeM1TargetWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl(page.url)).length === 1, `大样本多对一目标窗口包含 ${page.url}`);
+    }
+
+    // 测试 37：大样本多对多 - 3 个工作区互相移动，均既是源又是目标
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    await clearPendingOperations();
+    const largeM2mA = await createWorkspace('大样本多对多 A');
+    const largeM2mB = await createWorkspace('大样本多对多 B');
+    const largeM2mC = await createWorkspace('大样本多对多 C');
+    const largeM2mPagesA = [];
+    const largeM2mPagesB = [];
+    const largeM2mPagesC = [];
+    for (let i = 1; i <= 3; i++) {
+      largeM2mPagesA.push(await addTabToWorkspace(largeM2mA.id, `https://largem2m-a${i}.example.com`, `Large M2M A${i}`));
+      largeM2mPagesB.push(await addTabToWorkspace(largeM2mB.id, `https://largem2m-b${i}.example.com`, `Large M2M B${i}`));
+      largeM2mPagesC.push(await addTabToWorkspace(largeM2mC.id, `https://largem2m-c${i}.example.com`, `Large M2M C${i}`));
+    }
+
+    const largeM2mDataBefore = await loadWorkspaces();
+    const largeM2mAFresh = largeM2mDataBefore.workspaces.find(w => w.id === largeM2mA.id);
+    const largeM2mBFresh = largeM2mDataBefore.workspaces.find(w => w.id === largeM2mB.id);
+    const largeM2mCFresh = largeM2mDataBefore.workspaces.find(w => w.id === largeM2mC.id);
+    [largeM2mAFresh, largeM2mBFresh, largeM2mCFresh].forEach(ws => {
+      ws.windowId = null;
+      ws.tabs.forEach(tab => delete tab.realTabId);
+    });
+    await saveWorkspaces({ version: '1.0.0', workspaces: [largeM2mAFresh, largeM2mBFresh, largeM2mCFresh] });
+
+    const largeM2mMoves = [
+      ...largeM2mPagesA.slice(0, 2).map(p => ({ tabId: p.id, sourceWorkspaceId: largeM2mAFresh.id, targetWorkspaceId: largeM2mBFresh.id })),
+      ...largeM2mPagesB.slice(0, 2).map(p => ({ tabId: p.id, sourceWorkspaceId: largeM2mBFresh.id, targetWorkspaceId: largeM2mCFresh.id })),
+      ...largeM2mPagesC.slice(0, 2).map(p => ({ tabId: p.id, sourceWorkspaceId: largeM2mCFresh.id, targetWorkspaceId: largeM2mAFresh.id }))
+    ];
+    assert(await moveTabsToWorkspaces(largeM2mMoves) === true, '大样本多对多批量移动成功');
+
+    const largeM2mDataAfterMove = await loadWorkspaces();
+    const largeM2mAAfterMove = largeM2mDataAfterMove.workspaces.find(w => w.id === largeM2mAFresh.id);
+    const largeM2mBAfterMove = largeM2mDataAfterMove.workspaces.find(w => w.id === largeM2mBFresh.id);
+    const largeM2mCAfterMove = largeM2mDataAfterMove.workspaces.find(w => w.id === largeM2mCFresh.id);
+    assert(largeM2mAAfterMove.tabs.length === 3, '大样本多对多 A 包含 3 个标签页（1 保留 + 2 移入）');
+    assert(largeM2mAAfterMove.tabs.some(t => t.url === 'https://largem2m-a3.example.com'), '大样本多对多 A 保留 a3');
+    assert(largeM2mAAfterMove.tabs.some(t => t.url === 'https://largem2m-c1.example.com'), '大样本多对多 A 移入 c1');
+    assert(largeM2mAAfterMove.tabs.some(t => t.url === 'https://largem2m-c2.example.com'), '大样本多对多 A 移入 c2');
+    assert(largeM2mBAfterMove.tabs.length === 3, '大样本多对多 B 包含 3 个标签页（1 保留 + 2 移入）');
+    assert(largeM2mBAfterMove.tabs.some(t => t.url === 'https://largem2m-b3.example.com'), '大样本多对多 B 保留 b3');
+    assert(largeM2mBAfterMove.tabs.some(t => t.url === 'https://largem2m-a1.example.com'), '大样本多对多 B 移入 a1');
+    assert(largeM2mBAfterMove.tabs.some(t => t.url === 'https://largem2m-a2.example.com'), '大样本多对多 B 移入 a2');
+    assert(largeM2mCAfterMove.tabs.length === 3, '大样本多对多 C 包含 3 个标签页（1 保留 + 2 移入）');
+    assert(largeM2mCAfterMove.tabs.some(t => t.url === 'https://largem2m-c3.example.com'), '大样本多对多 C 保留 c3');
+    assert(largeM2mCAfterMove.tabs.some(t => t.url === 'https://largem2m-b1.example.com'), '大样本多对多 C 移入 b1');
+    assert(largeM2mCAfterMove.tabs.some(t => t.url === 'https://largem2m-b2.example.com'), '大样本多对多 C 移入 b2');
+
+    const largeM2mAWindow = await chrome.windows.create({ url: largeM2mPagesA.map(p => p.url), focused: false });
+    const largeM2mBWindow = await chrome.windows.create({ url: largeM2mPagesB.map(p => p.url), focused: false });
+    const largeM2mCWindow = await chrome.windows.create({ url: largeM2mPagesC.map(p => p.url), focused: false });
+
+    const largeM2mScanResult = await scanOpenWindowsAndAssociate();
+    console.log('[TEST_DEBUG] large m2m scan associated', largeM2mScanResult.associated);
+    assert(largeM2mScanResult.associated >= 3, '大样本多对多扫描至少关联 3 个工作区');
+
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    const largeM2mAWindowAfter = await chrome.windows.get(largeM2mAWindow.id, { populate: true });
+    console.log('[TEST_DEBUG] largeM2mAWindowAfter tabs', largeM2mAWindowAfter.tabs.map(t => t.url));
+    assert(largeM2mAWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://largem2m-a1.example.com')).length === 0, '大样本多对多 A 窗口中 a1 已关闭');
+    assert(largeM2mAWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://largem2m-a2.example.com')).length === 0, '大样本多对多 A 窗口中 a2 已关闭');
+    assert(largeM2mAWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://largem2m-a3.example.com')).length === 1, '大样本多对多 A 窗口保留 a3');
+    assert(largeM2mAWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://largem2m-c1.example.com')).length === 1, '大样本多对多 A 窗口包含 c1');
+    assert(largeM2mAWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://largem2m-c2.example.com')).length === 1, '大样本多对多 A 窗口包含 c2');
+
+    const largeM2mBWindowAfter = await chrome.windows.get(largeM2mBWindow.id, { populate: true });
+    console.log('[TEST_DEBUG] largeM2mBWindowAfter tabs', largeM2mBWindowAfter.tabs.map(t => t.url));
+    assert(largeM2mBWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://largem2m-b1.example.com')).length === 0, '大样本多对多 B 窗口中 b1 已关闭');
+    assert(largeM2mBWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://largem2m-b2.example.com')).length === 0, '大样本多对多 B 窗口中 b2 已关闭');
+    assert(largeM2mBWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://largem2m-b3.example.com')).length === 1, '大样本多对多 B 窗口保留 b3');
+    assert(largeM2mBWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://largem2m-a1.example.com')).length === 1, '大样本多对多 B 窗口包含 a1');
+    assert(largeM2mBWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://largem2m-a2.example.com')).length === 1, '大样本多对多 B 窗口包含 a2');
+
+    const largeM2mCWindowAfter = await chrome.windows.get(largeM2mCWindow.id, { populate: true });
+    console.log('[TEST_DEBUG] largeM2mCWindowAfter tabs', largeM2mCWindowAfter.tabs.map(t => t.url));
+    assert(largeM2mCWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://largem2m-c1.example.com')).length === 0, '大样本多对多 C 窗口中 c1 已关闭');
+    assert(largeM2mCWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://largem2m-c2.example.com')).length === 0, '大样本多对多 C 窗口中 c2 已关闭');
+    assert(largeM2mCWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://largem2m-c3.example.com')).length === 1, '大样本多对多 C 窗口保留 c3');
+    assert(largeM2mCWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://largem2m-b1.example.com')).length === 1, '大样本多对多 C 窗口包含 b1');
+    assert(largeM2mCWindowAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://largem2m-b2.example.com')).length === 1, '大样本多对多 C 窗口包含 b2');
+
+    const largeM2mDataFinal = await loadWorkspaces();
+    const largeM2mAFinal = largeM2mDataFinal.workspaces.find(w => w.id === largeM2mAFresh.id);
+    const largeM2mBFinal = largeM2mDataFinal.workspaces.find(w => w.id === largeM2mBFresh.id);
+    const largeM2mCFinal = largeM2mDataFinal.workspaces.find(w => w.id === largeM2mCFresh.id);
+    assert(largeM2mAFinal.pendingCleanup === undefined, '大样本多对多 A pendingCleanup 已清除');
+    assert(largeM2mBFinal.pendingCleanup === undefined, '大样本多对多 B pendingCleanup 已清除');
+    assert(largeM2mCFinal.pendingCleanup === undefined, '大样本多对多 C pendingCleanup 已清除');
+
+    } catch (error) {
+      log(`测试执行异常: ${error.message}`, 'fail');
+      console.error('[TEST_EXCEPTION]', error);
+    }
 
     // 输出汇总
     summaryEl.textContent = `测试完成：通过 ${passCount} 项，失败 ${failCount} 项`;
