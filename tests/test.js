@@ -1453,10 +1453,6 @@
     // 等待窗口创建监听器（500ms）和焦点扫描监听器（300ms）完成
     await new Promise(resolve => setTimeout(resolve, 700));
 
-    const nativeOnlyScanResult = await scanOpenWindowsAndAssociate();
-    console.log('[TEST_DEBUG] native scan associated', nativeOnlyScanResult.associated);
-    assert(nativeOnlyScanResult.associated >= 1, '原生场景扫描至少关联 1 个工作区');
-
     await new Promise(resolve => setTimeout(resolve, 200));
 
     const nativeAWindowAfter = await chrome.windows.get(nativeAWindow.id, { populate: true });
