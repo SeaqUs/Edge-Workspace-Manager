@@ -1576,6 +1576,42 @@
     assert(reopenedWs.tabs.every(t => typeof t.realTabId === 'number'), '恢复后所有标签页映射 realTabId');
     assert(!reopenedWs.lastSessionId, '会话 ID 一次性使用后清除');
 
+    // 测试 47：数据迁移——导出/导入 JSON 往返一致
+    await clearAllWindows();
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    await clearPendingOperations();
+    const migWs = await createWorkspace('迁移工作区');
+    const migTab1 = await addTabToWorkspace(migWs.id, 'https://mig-1.example.com', 'M1');
+    await addTabToWorkspace(migWs.id, 'https://mig-2.example.com', 'M2');
+    const migGroup = await createGroup(migWs.id, '迁移分组');
+    await assignTabToGroup(migWs.id, migTab1.id, migGroup.id);
+
+    const exportedJson = await exportWorkspacesData();
+    assert(typeof exportedJson === 'string' && exportedJson.length > 0, '导出返回非空 JSON 字符串');
+    const exportedObj = JSON.parse(exportedJson);
+    assert(exportedObj.workspaces.length === 1, '导出包含 1 个工作区');
+    assert(exportedObj.workspaces[0].tabs.length === 2, '导出工作区包含 2 个标签页');
+
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    const importedData = await importWorkspacesData(exportedJson);
+    assert(importedData.workspaces.length === 1, '导入后共 1 个工作区');
+    const importedWs = importedData.workspaces[0];
+    assert(importedWs.name === '迁移工作区', '导入后工作区名称一致');
+    assert(importedWs.tabs.length === 2, '导入后标签页数一致');
+    assert(importedWs.groups.length === 1, '导入后分组数一致');
+    assert(importedWs.groups[0].name === '迁移分组', '导入后分组名称一致');
+    assert(importedWs.tabs.filter(t => t.groupId === importedWs.groups[0].id).length === 1, '导入后分组归属一致');
+    assert(importedWs.windowId === null, '导入后运行时字段已清理（windowId 为 null）');
+    assert(importedWs.tabs.every(t => t.realTabId === undefined), '导入后运行时字段已清理（无 realTabId）');
+
+    let threwInvalid = false;
+    try {
+      await importWorkspacesData('not-json');
+    } catch (e) {
+      threwInvalid = true;
+    }
+    assert(threwInvalid, '无效 JSON 导入抛出错误');
+
     } catch (error) {
       log(`测试执行异常: ${error.message}`, 'fail');
       console.error('[TEST_EXCEPTION]', error);

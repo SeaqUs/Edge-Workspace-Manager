@@ -32,6 +32,11 @@
   const statOpenedEl = document.getElementById('stat-opened');
   const statTabsEl = document.getElementById('stat-tabs');
 
+  // 数据迁移相关元素
+  const btnExportDataEl = document.getElementById('btn-export-data');
+  const btnImportDataEl = document.getElementById('btn-import-data');
+  const inputImportFileEl = document.getElementById('input-import-file');
+
   // 当前数据缓存
   let workspaceData = { workspaces: [] };
   // 当前可导入窗口缓存
@@ -80,6 +85,62 @@
     // 侧边栏导航
     navWorkspacesEl.addEventListener('click', () => switchView('workspaces'));
     navImportEl.addEventListener('click', () => switchView('import'));
+
+    // 数据迁移事件
+    btnExportDataEl.addEventListener('click', exportData);
+    btnImportDataEl.addEventListener('click', () => inputImportFileEl.click());
+    inputImportFileEl.addEventListener('change', importDataFromFile);
+  }
+
+  /**
+   * 导出全部工作区数据为 JSON 文件（数据备份）
+   */
+  async function exportData() {
+    try {
+      const response = await sendMessage({ type: 'EXPORT_DATA' });
+      if (!response || !response.success) {
+        showError(response && response.error ? response.error : '导出失败');
+        return;
+      }
+      const blob = new Blob([response.data], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `edge-workspace-manager-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      showError(`导出失败: ${error.message}`);
+    }
+  }
+
+  /**
+   * 从 JSON 文件导入工作区数据（替换现有全部工作区）
+   * @param {Event} event - 文件输入的 change 事件
+   */
+  async function importDataFromFile(event) {
+    const file = event.target.files && event.target.files[0];
+    if (!file) return;
+    if (!confirm('导入将替换当前所有工作区数据，是否继续？')) {
+      inputImportFileEl.value = '';
+      return;
+    }
+    try {
+      const text = await file.text();
+      const response = await sendMessage({ type: 'IMPORT_DATA', data: text });
+      if (response && response.success) {
+        await loadAndRender();
+        showError(`已导入 ${response.workspaceCount} 个工作区`);
+      } else {
+        showError(response && response.error ? response.error : '导入失败');
+      }
+    } catch (error) {
+      showError(`导入失败: ${error.message}`);
+    } finally {
+      inputImportFileEl.value = '';
+    }
   }
 
   /**

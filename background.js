@@ -1911,6 +1911,66 @@ async function closeWorkspace(workspaceId) {
 }
 
 /**
+ * 导出全部工作区数据为 JSON 字符串
+ * 用于数据备份与迁移
+ * @returns {Promise<string>} JSON 字符串
+ */
+async function exportWorkspacesData() {
+  const data = await loadWorkspaces();
+  return JSON.stringify(data, null, 2);
+}
+
+/**
+ * 从 JSON 字符串导入工作区数据（替换现有全部工作区）
+ * 导入前清理运行时字段（windowId/realTabId/会话 ID 等），确保以干净状态重新打开
+ * @param {string|object} input - JSON 字符串或已解析对象
+ * @returns {Promise<object>} 导入后的完整数据对象
+ */
+async function importWorkspacesData(input) {
+  let parsed;
+  try {
+    parsed = typeof input === 'string' ? JSON.parse(input) : input;
+  } catch (error) {
+    throw new Error('无效的 JSON 数据');
+  }
+  if (!parsed || !Array.isArray(parsed.workspaces)) {
+    throw new Error('数据格式不正确：缺少 workspaces 数组');
+  }
+
+  const cleanWorkspaces = parsed.workspaces.map(ws => ({
+    id: ws.id || generateId('ws'),
+    name: ws.name || '未命名工作区',
+    icon: ws.icon || null,
+    createdAt: ws.createdAt || nowIso(),
+    updatedAt: nowIso(),
+    windowId: null, // 运行时字段，导入后重新打开
+    tabs: (ws.tabs || []).map(tab => ({
+      id: tab.id || generateId('tab'),
+      url: tab.url || 'edge://newtab/',
+      title: tab.title || tab.url || '新标签页',
+      favIconUrl: tab.favIconUrl || null,
+      groupId: tab.groupId || null,
+      pinned: !!tab.pinned,
+      createdAt: tab.createdAt || nowIso()
+    })),
+    groups: (ws.groups || []).map(g => ({
+      id: g.id || generateId('group'),
+      name: g.name || '未命名分组',
+      color: g.color || getRandomColor(),
+      collapsed: !!g.collapsed,
+      parentGroupId: g.parentGroupId || null
+    })),
+    layout: ws.layout || { sortBy: 'title', sortOrder: 'asc' }
+  }));
+
+  const data = await loadWorkspaces();
+  data.workspaces = cleanWorkspaces;
+  data.lastUpdated = nowIso();
+  await saveWorkspaces(data);
+  return data;
+}
+
+/**
  * 生成随机分组颜色
  * @returns {string} 十六进制颜色值
  */
@@ -2042,6 +2102,8 @@ if (typeof module !== 'undefined' && module.exports) {
     applyShadowGroupsToWindow,
     nativeColorToHex,
     hexToNativeColor,
+    exportWorkspacesData,
+    importWorkspacesData,
     generateId,
     nowIso
   };
@@ -2587,6 +2649,18 @@ async function handleMessage(request, sender, sendResponse) {
           associated: result.associated,
           unmatchedWindows: result.unmatchedWindows
         });
+        break;
+      }
+
+      case 'EXPORT_DATA': {
+        const json = await exportWorkspacesData();
+        sendResponse({ success: true, data: json });
+        break;
+      }
+
+      case 'IMPORT_DATA': {
+        const data = await importWorkspacesData(request.data);
+        sendResponse({ success: true, workspaceCount: data.workspaces.length });
         break;
       }
 
