@@ -9,10 +9,6 @@
     "windows",
     "sessions"
   ],
-  "host_permissions": [
-    "https://*/*",
-    "http://*/*"
-  ],
   "action": {
     "default_icon": {
       "16": "icons/icon.svg",
