@@ -1244,37 +1244,81 @@ async function forceCreateWorkspaceWindow(workspaceId) {
   syncWorkspaceLocks.add(workspaceId);
 
   try {
-    // 只把活动标签页 URL 交给窗口创建，其余标签页延迟挂起（点击时才真正加载），
-    // 避免大工作区一次性加载所有标签页造成的内存/CPU 峰值
-    const newWindow = await chrome.windows.create({
-      url: [urls[0]],
-      focused: true
-    });
-    ws.windowId = newWindow.id;
+    let newWindow = null;
+    let restored = false;
 
-    // 映射活动页真实标签页 ID
-    if (newWindow.tabs && newWindow.tabs.length > 0 && ws.tabs[0]) {
-      ws.tabs[0].realTabId = newWindow.tabs[0].id;
+    // 优先尝试高保真恢复：sessions.restore 保留窗口位置/尺寸、固定标签页与原生分组
+    if (ws.lastSessionId) {
+      try {
+        newWindow = await chrome.sessions.restore(ws.lastSessionId);
+        restored = true;
+        console.log(`[forceCreateWorkspaceWindow] 已通过 sessions.restore 高保真恢复窗口 ${newWindow.id}`);
+      } catch (error) {
+        console.warn('[forceCreateWorkspaceWindow] sessions.restore 失败，回退常规创建:', error);
+        newWindow = null;
+      }
     }
 
-    // 其余标签页：创建为后台标签页后立即 discard 卸载，点击时才真正加载
-    for (let i = 1; i < urls.length; i++) {
-      try {
-        const created = await chrome.tabs.create({
-          windowId: newWindow.id,
-          url: urls[i],
-          active: false
-        });
-        if (ws.tabs[i]) {
-          ws.tabs[i].realTabId = created.id;
+    if (restored && newWindow) {
+      // 恢复路径：按 URL 映射 realTabId，并补齐缺失标签页
+      ws.windowId = newWindow.id;
+      const usedIds = new Set();
+      ws.tabs.forEach(tab => {
+        const matched = (newWindow.tabs || []).find(t => !usedIds.has(t.id) && normalizeUrl(t.url) === normalizeUrl(tab.url));
+        if (matched) {
+          tab.realTabId = matched.id;
+          usedIds.add(matched.id);
+        } else {
+          delete tab.realTabId;
         }
+      });
+      for (const tab of ws.tabs) {
+        if (tab.realTabId) continue;
         try {
-          await chrome.tabs.discard(created.id);
+          const created = await chrome.tabs.create({ windowId: newWindow.id, url: tab.url, active: false });
+          tab.realTabId = created.id;
+          try {
+            await chrome.tabs.discard(created.id);
+          } catch (error) {
+            // 忽略 discard 失败
+          }
         } catch (error) {
-          // 环境不支持 discard 时忽略，标签页仍以后台方式加载
+          console.error('[Edge Workspace Manager] 恢复窗口补齐标签页失败:', error);
         }
-      } catch (error) {
-        console.error('[Edge Workspace Manager] 创建延迟标签页失败:', error);
+      }
+      ws.lastSessionId = null; // 会话一次性使用后清除
+    } else {
+      // 常规创建路径（惰性打开：仅活动页 eager 加载，其余标签页创建后立即挂起）
+      newWindow = await chrome.windows.create({
+        url: [urls[0]],
+        focused: true
+      });
+      ws.windowId = newWindow.id;
+
+      // 映射活动页真实标签页 ID
+      if (newWindow.tabs && newWindow.tabs.length > 0 && ws.tabs[0]) {
+        ws.tabs[0].realTabId = newWindow.tabs[0].id;
+      }
+
+      // 其余标签页：创建为后台标签页后立即 discard 卸载，点击时才真正加载
+      for (let i = 1; i < urls.length; i++) {
+        try {
+          const created = await chrome.tabs.create({
+            windowId: newWindow.id,
+            url: urls[i],
+            active: false
+          });
+          if (ws.tabs[i]) {
+            ws.tabs[i].realTabId = created.id;
+          }
+          try {
+            await chrome.tabs.discard(created.id);
+          } catch (error) {
+            // 环境不支持 discard 时忽略，标签页仍以后台方式加载
+          }
+        } catch (error) {
+          console.error('[Edge Workspace Manager] 创建延迟标签页失败:', error);
+        }
       }
     }
 
@@ -1292,10 +1336,12 @@ async function forceCreateWorkspaceWindow(workspaceId) {
 
     ws.updatedAt = nowIso();
     await saveWorkspaces(data);
-    // 将影子分组应用到新建窗口的原生标签页组（方向：影子库 → 原生）
-    await applyShadowGroupsToWindow(workspaceId);
+    // 恢复路径下窗口已自带原生分组，仅常规创建路径需要重新应用影子分组
+    if (!restored) {
+      await applyShadowGroupsToWindow(workspaceId);
+    }
     const elapsed = (performance.now() - startTime).toFixed(2);
-    console.log(`[forceCreateWorkspaceWindow] 工作区 ${workspaceId} 已创建窗口 ${ws.windowId}，标签页数 ${ws.tabs.length}（活动 1 + 挂起 ${Math.max(0, urls.length - 1)}），耗时 ${elapsed}ms`);
+    console.log(`[forceCreateWorkspaceWindow] 工作区 ${workspaceId} 已创建窗口 ${ws.windowId}，标签页数 ${ws.tabs.length}，耗时 ${elapsed}ms`);
     return ws;
   } catch (error) {
     console.error('[Edge Workspace Manager] 创建工作区窗口失败:', error);
@@ -1841,6 +1887,18 @@ async function closeWorkspace(workspaceId) {
     const removedWindowId = ws.windowId;
     ws.windowId = null;
     ws.tabs.forEach(tab => delete tab.realTabId);
+
+    // 捕获刚关闭窗口的会话 ID，供下次 sessions.restore 高保真恢复（保留窗口位置/尺寸/分组/固定标签页）
+    try {
+      const recent = await chrome.sessions.getRecentlyClosed();
+      const closedWin = recent.find(s => s.window && s.window.sessionId);
+      if (closedWin) {
+        ws.lastSessionId = closedWin.window.sessionId;
+      }
+    } catch (error) {
+      // sessions API 不可用时忽略
+    }
+
     ws.updatedAt = nowIso();
     await saveWorkspaces(data);
     const elapsed = (performance.now() - startTime).toFixed(2);

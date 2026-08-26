@@ -1553,6 +1553,29 @@
     assert(capturedWs.tabs.filter(t => t.groupId === capturedWs.groups[0].id).length === 2, '分组包含 2 个标签页');
     assert(capturedWs.tabs.filter(t => !t.groupId).length === 1, '未分组标签页 1 个');
 
+    // 测试 46：sessions.restore 高保真恢复——关闭后重开走会话恢复
+    await clearAllWindows();
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    await clearPendingOperations();
+    const sessWs = await createWorkspace('会话恢复');
+    await addTabToWorkspace(sessWs.id, 'https://sess-1.example.com', 'S1');
+    await addTabToWorkspace(sessWs.id, 'https://sess-2.example.com', 'S2');
+    const openedSess = await forceCreateWorkspaceWindow(sessWs.id);
+    assert(openedSess && openedSess.windowId, '会话恢复：首次打开窗口成功');
+
+    await closeWorkspace(sessWs.id);
+    const afterClose = await loadWorkspaces();
+    const closedSess = afterClose.workspaces.find(w => w.id === sessWs.id);
+    assert(closedSess.lastSessionId !== undefined && closedSess.lastSessionId !== null, '关闭后记录会话 ID');
+
+    const reopenedSess = await forceCreateWorkspaceWindow(sessWs.id);
+    assert(reopenedSess && reopenedSess.windowId, '会话恢复：重开窗口成功');
+    const reopenedData = await loadWorkspaces();
+    const reopenedWs = reopenedData.workspaces.find(w => w.id === sessWs.id);
+    assert(reopenedWs.tabs.length === 2, '恢复后影子库保留 2 个标签页');
+    assert(reopenedWs.tabs.every(t => typeof t.realTabId === 'number'), '恢复后所有标签页映射 realTabId');
+    assert(!reopenedWs.lastSessionId, '会话 ID 一次性使用后清除');
+
     } catch (error) {
       log(`测试执行异常: ${error.message}`, 'fail');
       console.error('[TEST_EXCEPTION]', error);

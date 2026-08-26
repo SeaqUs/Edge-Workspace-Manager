@@ -13,7 +13,9 @@
   let nextWindowId = 1000;
   let nextTabId = 1;
   let nextGroupId = 1;
+  let nextSessionId = 1;
   const windows = new Map();
+  const closedWindows = []; // 最近关闭的窗口会话（模拟 sessions API）
   let initialWindowsCreated = false;
 
   // 事件监听器集合，用于模拟 Chrome 扩展事件
@@ -241,7 +243,17 @@
       },
 
       remove(windowId) {
-        windows.delete(windowId);
+        const win = windows.get(windowId);
+        if (win) {
+          windows.delete(windowId);
+          // 记录为最近关闭的窗口会话（sessionId 挂到 window 上，匹配真实 sessions API）
+          const closedWin = JSON.parse(JSON.stringify(win));
+          closedWin.sessionId = 'session-' + (nextSessionId++);
+          closedWindows.unshift({
+            window: closedWin,
+            lastModified: Date.now()
+          });
+        }
         return Promise.resolve();
       },
 
@@ -482,6 +494,32 @@
       onUpdated: { addListener() {} },
       onRemoved: { addListener() {} },
       onMoved: { addListener() {} }
+    },
+
+    sessions: {
+      getRecentlyClosed(options) {
+        // 返回最近关闭的窗口会话（最多 MAX_SESSION_RESULTS 条）
+        return Promise.resolve(closedWindows.slice(0, 25).map(s => ({
+          window: JSON.parse(JSON.stringify(s.window)),
+          lastModified: s.lastModified
+        })));
+      },
+      restore(sessionId) {
+        const idx = closedWindows.findIndex(s => s.window.sessionId === sessionId);
+        if (idx === -1) return Promise.reject(new Error('session not found: ' + sessionId));
+        const [sess] = closedWindows.splice(idx, 1);
+        const win = JSON.parse(JSON.stringify(sess.window));
+        // 重新分配窗口与标签页 ID（模拟浏览器恢复会话时创建新窗口）
+        const windowId = nextWindowId++;
+        win.id = windowId;
+        win.focused = true;
+        delete win.sessionId;
+        win.tabs.forEach(t => { t.id = nextTabId++; t.windowId = windowId; });
+        windows.set(windowId, win);
+        return Promise.resolve(JSON.parse(JSON.stringify(win)));
+      },
+      MAX_SESSION_RESULTS: 25,
+      onChanged: { addListener() {} }
     }
   };
 })();
