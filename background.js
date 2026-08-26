@@ -1233,22 +1233,49 @@ async function forceCreateWorkspaceWindow(workspaceId) {
     }
   }
 
-  // 创建新窗口
+  // 创建新窗口（惰性打开：仅活动页 eager 加载，其余标签页创建后立即挂起）
   const urls = ws.tabs.length > 0 ? ws.tabs.map(t => t.url) : ['edge://newtab/'];
+
+  // 加锁防止 tabs.onCreated/onUpdated 在标签页创建期间干扰影子库
+  if (syncWorkspaceLocks.has(workspaceId)) {
+    console.log(`[forceCreateWorkspaceWindow] 工作区 ${workspaceId} 正在创建窗口，跳过重复调用`);
+    return null;
+  }
+  syncWorkspaceLocks.add(workspaceId);
+
   try {
+    // 只把活动标签页 URL 交给窗口创建，其余标签页延迟挂起（点击时才真正加载），
+    // 避免大工作区一次性加载所有标签页造成的内存/CPU 峰值
     const newWindow = await chrome.windows.create({
-      url: urls,
+      url: [urls[0]],
       focused: true
     });
-
-    // 记录窗口 ID 与真实标签页 ID 的映射
     ws.windowId = newWindow.id;
-    if (newWindow.tabs) {
-      newWindow.tabs.forEach((chromeTab, index) => {
-        if (ws.tabs[index]) {
-          ws.tabs[index].realTabId = chromeTab.id;
+
+    // 映射活动页真实标签页 ID
+    if (newWindow.tabs && newWindow.tabs.length > 0 && ws.tabs[0]) {
+      ws.tabs[0].realTabId = newWindow.tabs[0].id;
+    }
+
+    // 其余标签页：创建为后台标签页后立即 discard 卸载，点击时才真正加载
+    for (let i = 1; i < urls.length; i++) {
+      try {
+        const created = await chrome.tabs.create({
+          windowId: newWindow.id,
+          url: urls[i],
+          active: false
+        });
+        if (ws.tabs[i]) {
+          ws.tabs[i].realTabId = created.id;
         }
-      });
+        try {
+          await chrome.tabs.discard(created.id);
+        } catch (error) {
+          // 环境不支持 discard 时忽略，标签页仍以后台方式加载
+        }
+      } catch (error) {
+        console.error('[Edge Workspace Manager] 创建延迟标签页失败:', error);
+      }
     }
 
     // 去重：打开窗口时会触发 tabs.onCreated，可能重复写入标签页
@@ -1266,11 +1293,13 @@ async function forceCreateWorkspaceWindow(workspaceId) {
     ws.updatedAt = nowIso();
     await saveWorkspaces(data);
     const elapsed = (performance.now() - startTime).toFixed(2);
-    console.log(`[forceCreateWorkspaceWindow] 工作区 ${workspaceId} 已创建窗口 ${ws.windowId}，标签页数 ${ws.tabs.length}，耗时 ${elapsed}ms`);
+    console.log(`[forceCreateWorkspaceWindow] 工作区 ${workspaceId} 已创建窗口 ${ws.windowId}，标签页数 ${ws.tabs.length}（活动 1 + 挂起 ${Math.max(0, urls.length - 1)}），耗时 ${elapsed}ms`);
     return ws;
   } catch (error) {
     console.error('[Edge Workspace Manager] 创建工作区窗口失败:', error);
     return null;
+  } finally {
+    syncWorkspaceLocks.delete(workspaceId);
   }
 }
 

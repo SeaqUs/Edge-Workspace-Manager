@@ -1494,6 +1494,23 @@
     assert(moveDstAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://move-src.example.com')).length === 1, '跨窗口移动后目标工作区包含移入标签页');
     assert(moveDstAfter.tabs.length === 2, '跨窗口移动后目标工作区共 2 个标签页');
 
+    // 测试 43：惰性打开——仅活动页 eager 加载，其余标签页 discard 挂起
+    await clearAllWindows();
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    await clearPendingOperations();
+    const lazyWs = await createWorkspace('惰性打开');
+    await addTabToWorkspace(lazyWs.id, 'https://lazy-1.example.com', 'Lazy 1');
+    await addTabToWorkspace(lazyWs.id, 'https://lazy-2.example.com', 'Lazy 2');
+    await addTabToWorkspace(lazyWs.id, 'https://lazy-3.example.com', 'Lazy 3');
+    const openedLazy = await forceCreateWorkspaceWindow(lazyWs.id);
+    assert(openedLazy && openedLazy.windowId, '惰性打开创建窗口成功');
+
+    const lazyWindow = await chrome.windows.get(openedLazy.windowId, { populate: true });
+    assert(lazyWindow.tabs.length === 3, '惰性打开窗口共 3 个标签页');
+    assert(lazyWindow.tabs[0].discarded !== true, '活动页未被挂起');
+    assert(lazyWindow.tabs[1].discarded === true, '第二个标签页被挂起（惰性）');
+    assert(lazyWindow.tabs[2].discarded === true, '第三个标签页被挂起（惰性）');
+
     } catch (error) {
       log(`测试执行异常: ${error.message}`, 'fail');
       console.error('[TEST_EXCEPTION]', error);

@@ -370,6 +370,18 @@
         return Promise.resolve();
       },
 
+      discard(tabId) {
+        // 模拟挂起标签页：仅标记 discarded 状态，不实际卸载
+        for (const win of windows.values()) {
+          const tab = win.tabs.find(t => t.id === tabId);
+          if (tab) {
+            tab.discarded = true;
+            return Promise.resolve(JSON.parse(JSON.stringify(tab)));
+          }
+        }
+        return Promise.resolve(null);
+      },
+
       onCreated: {
         addListener(listener) {
           tabsOnCreatedListeners.push(listener);
