@@ -18,6 +18,9 @@
   // 事件监听器集合，用于模拟 Chrome 扩展事件
   const tabsOnCreatedListeners = [];
   const tabsOnUpdatedListeners = [];
+  const tabsOnDetachedListeners = [];
+  const tabsOnAttachedListeners = [];
+  const tabsOnMovedListeners = [];
   const windowsOnCreatedListeners = [];
 
   /**
@@ -55,6 +58,45 @@
         listener({ ...win });
       } catch (e) {
         console.error('[mock-chrome] windows.onCreated listener error:', e);
+      }
+    });
+  }
+
+  /**
+   * 触发 tabs.onDetached 事件（标签页从窗口分离，跨窗口移动第一步）
+   */
+  function fireTabsOnDetached(tab, detachInfo) {
+    tabsOnDetachedListeners.forEach(listener => {
+      try {
+        listener(tab.id, detachInfo);
+      } catch (e) {
+        console.error('[mock-chrome] tabs.onDetached listener error:', e);
+      }
+    });
+  }
+
+  /**
+   * 触发 tabs.onAttached 事件（标签页附加到窗口，跨窗口移动第二步）
+   */
+  function fireTabsOnAttached(tab, attachInfo) {
+    tabsOnAttachedListeners.forEach(listener => {
+      try {
+        listener(tab.id, attachInfo);
+      } catch (e) {
+        console.error('[mock-chrome] tabs.onAttached listener error:', e);
+      }
+    });
+  }
+
+  /**
+   * 触发 tabs.onMoved 事件（标签页在同一窗口内重排序）
+   */
+  function fireTabsOnMoved(tab, moveInfo) {
+    tabsOnMovedListeners.forEach(listener => {
+      try {
+        listener(tab.id, moveInfo);
+      } catch (e) {
+        console.error('[mock-chrome] tabs.onMoved listener error:', e);
       }
     });
   }
@@ -264,8 +306,55 @@
         return Promise.resolve(tab);
       },
 
+      get(tabId) {
+        for (const win of windows.values()) {
+          const tab = win.tabs.find(t => t.id === tabId);
+          if (tab) return Promise.resolve(JSON.parse(JSON.stringify(tab)));
+        }
+        return Promise.resolve(null);
+      },
+
       move(tabId, options) {
-        return Promise.resolve({ id: tabId, windowId: options.windowId, index: options.index });
+        // 查找标签页当前所在窗口
+        let sourceWin = null;
+        let tab = null;
+        for (const win of windows.values()) {
+          const idx = win.tabs.findIndex(t => t.id === tabId);
+          if (idx !== -1) { sourceWin = win; tab = win.tabs[idx]; break; }
+        }
+        if (!tab) return Promise.reject(new Error('tab not found: ' + tabId));
+
+        const targetWin = windows.get(options.windowId);
+        if (!targetWin) return Promise.reject(new Error('target window not found: ' + options.windowId));
+
+        const oldWindowId = sourceWin.id;
+        const oldIndex = tab.index;
+
+        // 从源窗口移除并重算 index
+        sourceWin.tabs.splice(sourceWin.tabs.findIndex(t => t.id === tabId), 1);
+        sourceWin.tabs.forEach((t, i) => { t.index = i; });
+
+        const newIndex = options.index !== undefined && options.index >= 0
+          ? Math.min(options.index, targetWin.tabs.length)
+          : targetWin.tabs.length;
+        tab.windowId = options.windowId;
+
+        if (oldWindowId === options.windowId) {
+          // 同一窗口内移动：重排序并触发 onMoved
+          targetWin.tabs.splice(newIndex, 0, tab);
+          targetWin.tabs.forEach((t, i) => { t.index = i; });
+          setTimeout(() => fireTabsOnMoved(tab, { windowId: options.windowId, fromIndex: oldIndex, toIndex: tab.index }), 0);
+        } else {
+          // 跨窗口移动：先触发 onDetached，再触发 onAttached
+          setTimeout(() => fireTabsOnDetached(tab, { oldWindowId: oldWindowId, oldPosition: oldIndex }), 0);
+          setTimeout(() => {
+            targetWin.tabs.splice(newIndex, 0, tab);
+            targetWin.tabs.forEach((t, i) => { t.index = i; });
+            fireTabsOnAttached(tab, { newWindowId: options.windowId, newPosition: tab.index });
+          }, 5);
+        }
+
+        return Promise.resolve({ id: tabId, windowId: options.windowId, index: tab.index });
       },
 
       remove(tabId) {
@@ -293,6 +382,21 @@
       },
       onRemoved: {
         addListener() {}
+      },
+      onDetached: {
+        addListener(listener) {
+          tabsOnDetachedListeners.push(listener);
+        }
+      },
+      onAttached: {
+        addListener(listener) {
+          tabsOnAttachedListeners.push(listener);
+        }
+      },
+      onMoved: {
+        addListener(listener) {
+          tabsOnMovedListeners.push(listener);
+        }
       }
     }
   };

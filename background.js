@@ -2112,6 +2112,101 @@ chrome.tabs.onCreated.addListener(async (tab) => {
 });
 
 /**
+ * 监听标签页分离事件（跨窗口移动的第一步）：
+ * 用户将标签页从工作区窗口拖出时，立即从影子数据库的源工作区移除。
+ * 注意：扩展自身使用 create/close 而非 move，故此事件仅由用户原生操作触发。
+ */
+chrome.tabs.onDetached.addListener(async (tabId, detachInfo) => {
+  try {
+    const data = await loadWorkspaces();
+    const sourceWs = data.workspaces.find(w => w.windowId === detachInfo.oldWindowId);
+    if (!sourceWs) return;
+
+    const tabIndex = sourceWs.tabs.findIndex(t => t.realTabId === tabId);
+    if (tabIndex === -1) return;
+
+    sourceWs.tabs.splice(tabIndex, 1);
+    sourceWs.updatedAt = nowIso();
+    await saveWorkspaces(data);
+    console.log(`[Edge Workspace Manager] 标签页 ${tabId} 已从窗口 ${detachInfo.oldWindowId} 分离，移出工作区 ${sourceWs.id}`);
+  } catch (error) {
+    console.error('[Edge Workspace Manager] 处理标签页分离事件失败:', error);
+  }
+});
+
+/**
+ * 监听标签页附加事件（跨窗口移动的第二步）：
+ * 用户将标签页拖入工作区窗口时，立即把该标签页加入目标工作区的影子数据库。
+ */
+chrome.tabs.onAttached.addListener(async (tabId, attachInfo) => {
+  try {
+    const data = await loadWorkspaces();
+    const targetWs = data.workspaces.find(w => w.windowId === attachInfo.newWindowId);
+    if (!targetWs) return;
+
+    // 去重：若影子数据库已记录该真实标签页，则不重复追加
+    if (targetWs.tabs.some(t => t.realTabId === tabId)) return;
+
+    // 获取标签页详情（URL/标题/favicon），失败时使用占位值，后续由 onUpdated 补全
+    let tab = null;
+    try {
+      tab = await chrome.tabs.get(tabId);
+    } catch (error) {
+      // 标签页可能尚在移动中，忽略获取失败
+    }
+
+    let hostname = '';
+    if (tab && tab.url) {
+      try {
+        hostname = new URL(tab.url).hostname;
+      } catch (error) {
+        // 忽略无效 URL
+      }
+    }
+
+    targetWs.tabs.push({
+      id: generateId('tab'),
+      url: (tab && tab.url) || 'edge://newtab/',
+      title: (tab && tab.title) || (tab && tab.url) || '新标签页',
+      favIconUrl: (tab && tab.favIconUrl) || (hostname ? `https://www.google.com/s2/favicons?domain=${hostname}` : null),
+      groupId: null,
+      pinned: (tab && tab.pinned) || false,
+      realTabId: tabId,
+      createdAt: nowIso()
+    });
+    targetWs.updatedAt = nowIso();
+    await saveWorkspaces(data);
+    console.log(`[Edge Workspace Manager] 标签页 ${tabId} 已附加到窗口 ${attachInfo.newWindowId}，加入工作区 ${targetWs.id}`);
+  } catch (error) {
+    console.error('[Edge Workspace Manager] 处理标签页附加事件失败:', error);
+  }
+});
+
+/**
+ * 监听标签页在同一窗口内的移动事件：同步更新影子数据库中的标签页顺序。
+ * 采用尽力而为的重排序（浏览器 index 与影子数组顺序近似对齐），
+ * 顺序偏差不影响正确性，仅影响重新打开工作区时的标签页排列。
+ */
+chrome.tabs.onMoved.addListener(async (tabId, moveInfo) => {
+  try {
+    const data = await loadWorkspaces();
+    const ws = data.workspaces.find(w => w.windowId === moveInfo.windowId);
+    if (!ws) return;
+
+    const fromIndex = ws.tabs.findIndex(t => t.realTabId === tabId);
+    if (fromIndex === -1) return;
+
+    const [moved] = ws.tabs.splice(fromIndex, 1);
+    const toIndex = Math.max(0, Math.min(moveInfo.toIndex, ws.tabs.length));
+    ws.tabs.splice(toIndex, 0, moved);
+    ws.updatedAt = nowIso();
+    await saveWorkspaces(data);
+  } catch (error) {
+    console.error('[Edge Workspace Manager] 处理标签页移动事件失败:', error);
+  }
+});
+
+/**
  * 监听存储变化，向所有 popup 页面广播刷新消息
  */
 chrome.storage.onChanged.addListener((changes, namespace) => {

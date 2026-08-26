@@ -1469,6 +1469,31 @@
     assert(nativeBFinal.windowId === null, '原生 B 工作区未关联（未打开）');
     assert(nativeCFinal.windowId === null, '原生 C 工作区未关联（未打开）');
 
+    // 测试 42：用户原生拖拽跨窗口移动标签页（tabs.onDetached/onAttached 事件驱动同步）
+    await clearAllWindows();
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    await clearPendingOperations();
+    const moveSrc = await createWorkspace('移动源');
+    const moveDst = await createWorkspace('移动目标');
+    await addTabToWorkspace(moveSrc.id, 'https://move-src.example.com', 'Move Src');
+    await addTabToWorkspace(moveDst.id, 'https://move-dst.example.com', 'Move Dst');
+    await forceCreateWorkspaceWindow(moveSrc.id);
+    const openedMoveDst = await forceCreateWorkspaceWindow(moveDst.id);
+
+    const moveDataBefore = await loadWorkspaces();
+    const moveSrcTab = moveDataBefore.workspaces.find(w => w.id === moveSrc.id).tabs[0];
+    // 用户将源工作区的标签页拖到目标工作区窗口
+    await chrome.tabs.move(moveSrcTab.realTabId, { windowId: openedMoveDst.windowId, index: -1 });
+    // 等待 onDetached/onAttached 事件处理完成
+    await new Promise(resolve => setTimeout(resolve, 80));
+
+    const moveDataAfter = await loadWorkspaces();
+    const moveSrcAfter = moveDataAfter.workspaces.find(w => w.id === moveSrc.id);
+    const moveDstAfter = moveDataAfter.workspaces.find(w => w.id === moveDst.id);
+    assert(moveSrcAfter.tabs.length === 0, '跨窗口移动后源工作区标签页被移除');
+    assert(moveDstAfter.tabs.filter(t => normalizeUrl(t.url) === normalizeUrl('https://move-src.example.com')).length === 1, '跨窗口移动后目标工作区包含移入标签页');
+    assert(moveDstAfter.tabs.length === 2, '跨窗口移动后目标工作区共 2 个标签页');
+
     } catch (error) {
       log(`测试执行异常: ${error.message}`, 'fail');
       console.error('[TEST_EXCEPTION]', error);
