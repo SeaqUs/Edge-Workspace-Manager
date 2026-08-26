@@ -1511,6 +1511,48 @@
     assert(lazyWindow.tabs[1].discarded === true, '第二个标签页被挂起（惰性）');
     assert(lazyWindow.tabs[2].discarded === true, '第三个标签页被挂起（惰性）');
 
+    // 测试 44：原生标签页组——打开工作区时应用影子分组到原生分组（影子 → 原生）
+    await clearAllWindows();
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    await clearPendingOperations();
+    const groupWs = await createWorkspace('分组应用');
+    const gTab1 = await addTabToWorkspace(groupWs.id, 'https://group-1.example.com', 'G1');
+    const gTab2 = await addTabToWorkspace(groupWs.id, 'https://group-2.example.com', 'G2');
+    await addTabToWorkspace(groupWs.id, 'https://group-3.example.com', 'G3');
+    const shadowGroup = await createGroup(groupWs.id, '开发工具');
+    await assignTabToGroup(groupWs.id, gTab1.id, shadowGroup.id);
+    await assignTabToGroup(groupWs.id, gTab2.id, shadowGroup.id);
+
+    const openedGroup = await forceCreateWorkspaceWindow(groupWs.id);
+    assert(openedGroup && openedGroup.windowId, '分组应用创建窗口成功');
+    const groupWindow = await chrome.windows.get(openedGroup.windowId, { populate: true });
+    const groupedTabs = groupWindow.tabs.filter(t => t.groupId !== undefined && t.groupId !== null);
+    assert(groupedTabs.length === 2, '原生分组包含 2 个标签页');
+    const nativeGroups = await chrome.tabGroups.query({ windowId: openedGroup.windowId });
+    assert(nativeGroups.length === 1, '窗口中有 1 个原生分组');
+    assert(nativeGroups[0].title === '开发工具', '原生分组名称已应用');
+
+    // 测试 45：原生标签页组——导入窗口时捕获原生分组到影子库（原生 → 影子）
+    await clearAllWindows();
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    await clearPendingOperations();
+    const nativeWin = await chrome.windows.create({
+      url: ['https://native-group-a.example.com', 'https://native-group-b.example.com', 'https://native-ungrouped.example.com'],
+      focused: false
+    });
+    await new Promise(resolve => setTimeout(resolve, 30));
+    const ngId = await chrome.tabs.group({
+      tabIds: [nativeWin.tabs[0].id, nativeWin.tabs[1].id],
+      createProperties: { windowId: nativeWin.id }
+    });
+    await chrome.tabGroups.update(ngId, { title: '原生分组', color: 'green' });
+
+    const capturedWs = await importCurrentWindow('捕获分组');
+    assert(capturedWs && capturedWs.groups.length === 1, '捕获到 1 个原生分组');
+    assert(capturedWs.groups[0].name === '原生分组', '捕获的分组名称正确');
+    assert(capturedWs.tabs.filter(t => t.groupId === capturedWs.groups[0].id).length === 2, '分组包含 2 个标签页');
+    assert(capturedWs.tabs.filter(t => !t.groupId).length === 1, '未分组标签页 1 个');
+
     } catch (error) {
       log(`测试执行异常: ${error.message}`, 'fail');
       console.error('[TEST_EXCEPTION]', error);

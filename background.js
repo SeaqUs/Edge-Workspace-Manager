@@ -1292,6 +1292,8 @@ async function forceCreateWorkspaceWindow(workspaceId) {
 
     ws.updatedAt = nowIso();
     await saveWorkspaces(data);
+    // 将影子分组应用到新建窗口的原生标签页组（方向：影子库 → 原生）
+    await applyShadowGroupsToWindow(workspaceId);
     const elapsed = (performance.now() - startTime).toFixed(2);
     console.log(`[forceCreateWorkspaceWindow] 工作区 ${workspaceId} 已创建窗口 ${ws.windowId}，标签页数 ${ws.tabs.length}（活动 1 + 挂起 ${Math.max(0, urls.length - 1)}），耗时 ${elapsed}ms`);
     return ws;
@@ -1309,7 +1311,7 @@ async function forceCreateWorkspaceWindow(workspaceId) {
  * @param {string} [name] - 工作区名称，缺省使用窗口标题或时间
  * @returns {object|null} 转换后的工作区对象
  */
-function convertChromeWindowToWorkspace(chromeWindow, name) {
+async function convertChromeWindowToWorkspace(chromeWindow, name) {
   if (!chromeWindow || !chromeWindow.tabs || chromeWindow.tabs.length === 0) {
     return null;
   }
@@ -1329,7 +1331,27 @@ function convertChromeWindowToWorkspace(chromeWindow, name) {
     }
   };
 
-  // 将 chrome 标签页转换为影子标签页，并记录真实标签页 ID
+  // 捕获原生标签页组（方向：原生 → 影子库），保留分组名称/颜色/折叠/成员关系
+  const nativeGroupMap = new Map(); // 原生 groupId -> 影子 groupId
+  try {
+    const nativeGroups = await chrome.tabGroups.query({ windowId: chromeWindow.id });
+    for (const ng of nativeGroups) {
+      const shadowGroup = {
+        id: generateId('group'),
+        name: ng.title || '未命名分组',
+        color: nativeColorToHex(ng.color),
+        collapsed: !!ng.collapsed,
+        parentGroupId: null,
+        nativeGroupId: ng.id
+      };
+      workspace.groups.push(shadowGroup);
+      nativeGroupMap.set(ng.id, shadowGroup.id);
+    }
+  } catch (error) {
+    // tabGroups API 不可用或不支持时忽略，分组保持为空
+  }
+
+  // 将 chrome 标签页转换为影子标签页，并记录真实标签页 ID 与分组归属
   workspace.tabs = chromeWindow.tabs.map((chromeTab) => {
     let hostname = '';
     try {
@@ -1340,12 +1362,18 @@ function convertChromeWindowToWorkspace(chromeWindow, name) {
       // 忽略无效 URL
     }
 
+    // 将原生分组映射为影子分组
+    let shadowGroupId = null;
+    if (chromeTab.groupId !== undefined && chromeTab.groupId !== null && nativeGroupMap.has(chromeTab.groupId)) {
+      shadowGroupId = nativeGroupMap.get(chromeTab.groupId);
+    }
+
     return {
       id: generateId('tab'),
       url: chromeTab.url || 'edge://newtab/',
       title: chromeTab.title || chromeTab.url || '新标签页',
       favIconUrl: chromeTab.favIconUrl || (hostname ? `https://www.google.com/s2/favicons?domain=${hostname}` : null),
-      groupId: null,
+      groupId: shadowGroupId,
       pinned: chromeTab.pinned || false,
       realTabId: chromeTab.id,
       createdAt: nowIso()
@@ -1365,7 +1393,7 @@ async function importCurrentWindow(name) {
   try {
     // 获取最近一次聚焦的窗口（popup 打开前的活动窗口），包含标签页信息
     const currentWindow = await chrome.windows.getLastFocused({ populate: true });
-    const newWorkspace = convertChromeWindowToWorkspace(currentWindow, name);
+    const newWorkspace = await convertChromeWindowToWorkspace(currentWindow, name);
     if (!newWorkspace) {
       console.warn('[Edge Workspace Manager] 当前窗口无标签页，无法导入');
       return null;
@@ -1401,8 +1429,8 @@ async function importAllWindows() {
     const data = await loadWorkspaces();
     const importedWorkspaces = [];
 
-    normalWindows.forEach((chromeWindow, index) => {
-      const newWorkspace = convertChromeWindowToWorkspace(
+    for (const [index, chromeWindow] of normalWindows.entries()) {
+      const newWorkspace = await convertChromeWindowToWorkspace(
         chromeWindow,
         `导入工作区 ${index + 1}`
       );
@@ -1410,7 +1438,7 @@ async function importAllWindows() {
         data.workspaces.push(newWorkspace);
         importedWorkspaces.push(newWorkspace);
       }
-    });
+    }
 
     await saveWorkspaces(data);
     console.log(`[importAllWindows] 已导入 ${importedWorkspaces.length} 个窗口，当前工作区总数 ${data.workspaces.length}`);
@@ -1472,8 +1500,8 @@ async function importSelectedWindows(windowIds) {
     const data = await loadWorkspaces();
     const importedWorkspaces = [];
 
-    selectedWindows.forEach((chromeWindow, index) => {
-      const newWorkspace = convertChromeWindowToWorkspace(
+    for (const chromeWindow of selectedWindows) {
+      const newWorkspace = await convertChromeWindowToWorkspace(
         chromeWindow,
         `导入工作区 ${data.workspaces.length + importedWorkspaces.length + 1}`
       );
@@ -1481,7 +1509,7 @@ async function importSelectedWindows(windowIds) {
         data.workspaces.push(newWorkspace);
         importedWorkspaces.push(newWorkspace);
       }
-    });
+    }
 
     await saveWorkspaces(data);
     console.log(`[importSelectedWindows] 已导入 ${importedWorkspaces.length} 个选中窗口，当前工作区总数 ${data.workspaces.length}`);
@@ -1836,6 +1864,85 @@ function getRandomColor() {
   return colors[Math.floor(Math.random() * colors.length)];
 }
 
+/**
+ * 影子库分组颜色（十六进制）与原生 tabGroups 枚举颜色之间的映射表
+ */
+const NATIVE_COLOR_MAP = [
+  { native: 'grey', hex: '#9AA0A6' },
+  { native: 'blue', hex: '#4285F4' },
+  { native: 'red', hex: '#EA4335' },
+  { native: 'yellow', hex: '#FBBC05' },
+  { native: 'green', hex: '#34A853' },
+  { native: 'pink', hex: '#F06292' },
+  { native: 'purple', hex: '#AA00FF' },
+  { native: 'cyan', hex: '#00BCD4' },
+  { native: 'orange', hex: '#FF6D00' }
+];
+
+/**
+ * 将原生 tabGroups 枚举颜色转换为十六进制颜色
+ * @param {string} nativeColor - 原生枚举颜色（如 'blue'）
+ * @returns {string} 十六进制颜色值
+ */
+function nativeColorToHex(nativeColor) {
+  const found = NATIVE_COLOR_MAP.find(c => c.native === nativeColor);
+  return found ? found.hex : '#4285F4';
+}
+
+/**
+ * 将十六进制颜色转换为原生 tabGroups 枚举颜色
+ * @param {string} hex - 十六进制颜色值
+ * @returns {string|undefined} 原生枚举颜色，未匹配时返回 undefined（使用浏览器默认色）
+ */
+function hexToNativeColor(hex) {
+  const normalized = (hex || '').toLowerCase();
+  const found = NATIVE_COLOR_MAP.find(c => c.hex.toLowerCase() === normalized);
+  return found ? found.native : undefined;
+}
+
+/**
+ * 将影子库的分组应用到窗口的原生标签页组（方向：影子库 → 原生）
+ * 用于打开工作区后还原分组结构（名称/颜色/折叠/成员）
+ * @param {string} workspaceId - 工作区 ID
+ * @returns {Promise<boolean>} 是否成功应用
+ */
+async function applyShadowGroupsToWindow(workspaceId) {
+  const data = await loadWorkspaces();
+  const ws = data.workspaces.find(w => w.id === workspaceId);
+  if (!ws || !ws.windowId) return false;
+  if (!ws.groups || ws.groups.length === 0) return false;
+
+  for (const group of ws.groups) {
+    const memberTabIds = ws.tabs
+      .filter(t => t.groupId === group.id && t.realTabId)
+      .map(t => t.realTabId);
+    if (memberTabIds.length === 0) continue;
+
+    try {
+      // 将成员标签页编组，返回原生分组 ID
+      const nativeGroupId = await chrome.tabs.group({
+        tabIds: memberTabIds,
+        createProperties: { windowId: ws.windowId }
+      });
+
+      // 应用分组的名称/颜色/折叠状态
+      const updateProps = { collapsed: !!group.collapsed };
+      if (group.name) updateProps.title = group.name;
+      const nativeColor = hexToNativeColor(group.color);
+      if (nativeColor) updateProps.color = nativeColor;
+      await chrome.tabGroups.update(nativeGroupId, updateProps);
+
+      group.nativeGroupId = nativeGroupId;
+      ws.updatedAt = nowIso();
+    } catch (error) {
+      console.warn('[Edge Workspace Manager] 应用原生分组失败:', error);
+    }
+  }
+
+  await saveWorkspaces(data);
+  return true;
+}
+
 // 导出模块供 popup / background 使用
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
@@ -1874,6 +1981,9 @@ if (typeof module !== 'undefined' && module.exports) {
     loadPendingOperations,
     savePendingOperations,
     forceCreateWorkspaceWindow,
+    applyShadowGroupsToWindow,
+    nativeColorToHex,
+    hexToNativeColor,
     generateId,
     nowIso
   };

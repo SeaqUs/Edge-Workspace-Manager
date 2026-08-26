@@ -12,6 +12,7 @@
   // 窗口与标签页计数器
   let nextWindowId = 1000;
   let nextTabId = 1;
+  let nextGroupId = 1;
   const windows = new Map();
   let initialWindowsCreated = false;
 
@@ -382,6 +383,24 @@
         return Promise.resolve(null);
       },
 
+      group(options) {
+        // 将若干标签页编为一个新原生分组，返回原生分组 ID
+        const groupId = nextGroupId++;
+        for (const tabId of (options.tabIds || [])) {
+          for (const win of windows.values()) {
+            const tab = win.tabs.find(t => t.id === tabId);
+            if (tab) {
+              tab.groupId = groupId;
+              tab.groupTitle = '';
+              tab.groupColor = 'blue';
+              tab.groupCollapsed = false;
+              break;
+            }
+          }
+        }
+        return Promise.resolve(groupId);
+      },
+
       onCreated: {
         addListener(listener) {
           tabsOnCreatedListeners.push(listener);
@@ -410,6 +429,59 @@
           tabsOnMovedListeners.push(listener);
         }
       }
+    },
+
+    tabGroups: {
+      query(options) {
+        // 从指定窗口的标签页中收集所有原生分组
+        const win = windows.get(options.windowId);
+        if (!win) return Promise.resolve([]);
+        const groupMap = new Map();
+        for (const tab of win.tabs) {
+          if (tab.groupId !== undefined && tab.groupId !== null && !groupMap.has(tab.groupId)) {
+            groupMap.set(tab.groupId, {
+              id: tab.groupId,
+              title: tab.groupTitle || '',
+              color: tab.groupColor || 'blue',
+              collapsed: !!tab.groupCollapsed,
+              windowId: win.id
+            });
+          }
+        }
+        return Promise.resolve(Array.from(groupMap.values()));
+      },
+      get(groupId) {
+        for (const win of windows.values()) {
+          const tab = win.tabs.find(t => t.groupId === groupId);
+          if (tab) {
+            return Promise.resolve({
+              id: groupId,
+              title: tab.groupTitle || '',
+              color: tab.groupColor || 'blue',
+              collapsed: !!tab.groupCollapsed,
+              windowId: win.id
+            });
+          }
+        }
+        return Promise.resolve(null);
+      },
+      update(groupId, props) {
+        // 更新同一分组内所有标签页的分组属性
+        for (const win of windows.values()) {
+          for (const tab of win.tabs) {
+            if (tab.groupId === groupId) {
+              if (props.title !== undefined) tab.groupTitle = props.title;
+              if (props.color !== undefined) tab.groupColor = props.color;
+              if (props.collapsed !== undefined) tab.groupCollapsed = props.collapsed;
+            }
+          }
+        }
+        return Promise.resolve({ id: groupId, title: props.title, color: props.color, collapsed: props.collapsed });
+      },
+      onCreated: { addListener() {} },
+      onUpdated: { addListener() {} },
+      onRemoved: { addListener() {} },
+      onMoved: { addListener() {} }
     }
   };
 })();
