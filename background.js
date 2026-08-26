@@ -29,6 +29,9 @@ const WINDOW_MATCH_THRESHOLD_STRICT = 0.8;
 // 待执行操作队列的存储键名
 const PENDING_OPS_KEY = 'pendingOperations';
 
+// 已删除工作区（回收站）存储键名，用于删除撤销
+const TRASH_KEY = 'deletedWorkspaces';
+
 // 防止 syncWorkspaceToWindow 并发执行的锁集合
 const syncWorkspaceLocks = new Set();
 
@@ -684,11 +687,86 @@ async function deleteWorkspace(workspaceId) {
     }
   }
 
+  // 软删除：移入回收站而非直接删除，便于撤销
+  const deletedWs = JSON.parse(JSON.stringify(ws));
+  deletedWs.deletedAt = nowIso();
+  deletedWs.windowId = null;
+  (deletedWs.tabs || []).forEach(t => delete t.realTabId);
+  (deletedWs.groups || []).forEach(g => delete g.nativeGroupId);
+
+  try {
+    const trash = await loadDeletedWorkspaces();
+    trash.unshift(deletedWs);
+    await chrome.storage.local.set({ [TRASH_KEY]: trash });
+  } catch (error) {
+    console.error('[deleteWorkspace] 移入回收站失败:', error);
+  }
+
   data.workspaces = data.workspaces.filter(w => w.id !== workspaceId);
   await saveWorkspaces(data);
   const elapsed = (performance.now() - startTime).toFixed(2);
   console.log(`[deleteWorkspace] 已删除工作区 ${workspaceId}（${ws.name}），剩余工作区 ${data.workspaces.length}，耗时 ${elapsed}ms`);
   return true;
+}
+
+/**
+ * 从存储读取已删除工作区（回收站）列表
+ * @returns {Promise<object[]>} 已删除工作区数组
+ */
+async function loadDeletedWorkspaces() {
+  try {
+    const result = await chrome.storage.local.get([TRASH_KEY]);
+    return result[TRASH_KEY] || [];
+  } catch (error) {
+    console.error('[Edge Workspace Manager] 读取回收站失败:', error);
+    return [];
+  }
+}
+
+/**
+ * 获取已删除工作区（回收站）列表
+ * @returns {Promise<object[]>} 已删除工作区数组（按删除时间倒序）
+ */
+async function getDeletedWorkspaces() {
+  return await loadDeletedWorkspaces();
+}
+
+/**
+ * 从回收站恢复已删除的工作区
+ * @param {string} workspaceId - 工作区 ID
+ * @returns {Promise<boolean>} 是否恢复成功
+ */
+async function restoreWorkspace(workspaceId) {
+  const trash = await loadDeletedWorkspaces();
+  const index = trash.findIndex(w => w.id === workspaceId);
+  if (index === -1) {
+    console.warn(`[restoreWorkspace] 回收站中未找到工作区 ${workspaceId}`);
+    return false;
+  }
+
+  const [restored] = trash.splice(index, 1);
+  await chrome.storage.local.set({ [TRASH_KEY]: trash });
+
+  delete restored.deletedAt;
+  const data = await loadWorkspaces();
+  data.workspaces.push(restored);
+  await saveWorkspaces(data);
+  console.log(`[restoreWorkspace] 已从回收站恢复工作区 ${workspaceId}（${restored.name}）`);
+  return true;
+}
+
+/**
+ * 清空回收站
+ * @returns {Promise<boolean>} 是否成功
+ */
+async function emptyTrash() {
+  try {
+    await chrome.storage.local.set({ [TRASH_KEY]: [] });
+    return true;
+  } catch (error) {
+    console.error('[Edge Workspace Manager] 清空回收站失败:', error);
+    return false;
+  }
 }
 
 /**
@@ -2104,6 +2182,10 @@ if (typeof module !== 'undefined' && module.exports) {
     hexToNativeColor,
     exportWorkspacesData,
     importWorkspacesData,
+    loadDeletedWorkspaces,
+    getDeletedWorkspaces,
+    restoreWorkspace,
+    emptyTrash,
     generateId,
     nowIso
   };
@@ -2661,6 +2743,24 @@ async function handleMessage(request, sender, sendResponse) {
       case 'IMPORT_DATA': {
         const data = await importWorkspacesData(request.data);
         sendResponse({ success: true, workspaceCount: data.workspaces.length });
+        break;
+      }
+
+      case 'GET_DELETED_WORKSPACES': {
+        const deleted = await getDeletedWorkspaces();
+        sendResponse({ success: true, workspaces: deleted });
+        break;
+      }
+
+      case 'RESTORE_WORKSPACE': {
+        const ok = await restoreWorkspace(request.workspaceId);
+        sendResponse({ success: ok });
+        break;
+      }
+
+      case 'EMPTY_TRASH': {
+        const ok = await emptyTrash();
+        sendResponse({ success: ok });
         break;
       }
 

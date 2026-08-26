@@ -1612,6 +1612,34 @@
     }
     assert(threwInvalid, '无效 JSON 导入抛出错误');
 
+    // 测试 48：回收站/撤销删除——软删除、恢复、清空
+    await clearAllWindows();
+    await saveWorkspaces({ version: '1.0.0', workspaces: [] });
+    await clearPendingOperations();
+    await emptyTrash();
+    const trashWs = await createWorkspace('回收站测试');
+    await addTabToWorkspace(trashWs.id, 'https://trash.example.com', 'Trash');
+
+    assert(await deleteWorkspace(trashWs.id) === true, '删除工作区成功（软删除）');
+    const afterDelete = await loadWorkspaces();
+    assert(afterDelete.workspaces.length === 0, '删除后工作区列表为空');
+    const deletedList = await getDeletedWorkspaces();
+    assert(deletedList.length === 1, '回收站包含 1 个已删除工作区');
+    assert(deletedList[0].name === '回收站测试', '回收站工作区名称正确');
+    assert(deletedList[0].tabs.length === 1, '回收站工作区保留标签页');
+
+    assert(await restoreWorkspace(trashWs.id) === true, '从回收站恢复成功');
+    const afterRestore = await loadWorkspaces();
+    assert(afterRestore.workspaces.length === 1, '恢复后工作区列表有 1 个');
+    assert(afterRestore.workspaces[0].id === trashWs.id, '恢复的工作区 ID 一致');
+    const afterRestoreTrash = await getDeletedWorkspaces();
+    assert(afterRestoreTrash.length === 0, '恢复后回收站为空');
+
+    await deleteWorkspace(trashWs.id);
+    assert(await emptyTrash() === true, '清空回收站成功');
+    const afterEmpty = await getDeletedWorkspaces();
+    assert(afterEmpty.length === 0, '清空后回收站为空');
+
     } catch (error) {
       log(`测试执行异常: ${error.message}`, 'fail');
       console.error('[TEST_EXCEPTION]', error);

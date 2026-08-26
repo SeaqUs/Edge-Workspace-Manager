@@ -37,6 +37,13 @@
   const btnImportDataEl = document.getElementById('btn-import-data');
   const inputImportFileEl = document.getElementById('input-import-file');
 
+  // 回收站相关元素
+  const navTrashEl = document.getElementById('nav-trash');
+  const trashPanelEl = document.getElementById('trash-panel');
+  const trashListEl = document.getElementById('trash-list');
+  const trashEmptyEl = document.getElementById('trash-empty');
+  const btnEmptyTrashEl = document.getElementById('btn-empty-trash');
+
   // 当前数据缓存
   let workspaceData = { workspaces: [] };
   // 当前可导入窗口缓存
@@ -85,11 +92,15 @@
     // 侧边栏导航
     navWorkspacesEl.addEventListener('click', () => switchView('workspaces'));
     navImportEl.addEventListener('click', () => switchView('import'));
+    navTrashEl.addEventListener('click', () => switchView('trash'));
 
     // 数据迁移事件
     btnExportDataEl.addEventListener('click', exportData);
     btnImportDataEl.addEventListener('click', () => inputImportFileEl.click());
     inputImportFileEl.addEventListener('change', importDataFromFile);
+
+    // 回收站事件
+    btnEmptyTrashEl.addEventListener('click', emptyTrash);
   }
 
   /**
@@ -144,6 +155,85 @@
   }
 
   /**
+   * 加载并渲染回收站列表
+   */
+  async function loadTrashView() {
+    try {
+      const response = await sendMessage({ type: 'GET_DELETED_WORKSPACES' });
+      const deleted = (response && response.success && response.workspaces) || [];
+      trashListEl.innerHTML = '';
+      trashEmptyEl.classList.toggle('hidden', deleted.length > 0);
+
+      deleted.forEach((ws) => {
+        const item = document.createElement('div');
+        item.className = 'import-window-item';
+
+        const info = document.createElement('div');
+        info.className = 'import-window-info';
+
+        const title = document.createElement('div');
+        title.className = 'import-window-title';
+        title.textContent = ws.name || '未命名工作区';
+
+        const meta = document.createElement('div');
+        meta.className = 'import-window-meta';
+        meta.textContent = `${ws.tabs ? ws.tabs.length : 0} 个标签页`;
+
+        info.appendChild(title);
+        info.appendChild(meta);
+
+        const restoreBtn = document.createElement('button');
+        restoreBtn.className = 'btn btn-small btn-primary';
+        restoreBtn.type = 'button';
+        restoreBtn.textContent = '恢复';
+        restoreBtn.addEventListener('click', () => restoreWorkspaceFromTrash(ws.id));
+
+        item.appendChild(info);
+        item.appendChild(restoreBtn);
+        trashListEl.appendChild(item);
+      });
+    } catch (error) {
+      showError(`加载回收站失败: ${error.message}`);
+    }
+  }
+
+  /**
+   * 从回收站恢复单个工作区
+   * @param {string} workspaceId - 工作区 ID
+   */
+  async function restoreWorkspaceFromTrash(workspaceId) {
+    try {
+      const response = await sendMessage({ type: 'RESTORE_WORKSPACE', workspaceId });
+      if (response && response.success) {
+        await loadTrashView();
+      } else {
+        showError(response && response.error ? response.error : '恢复失败');
+      }
+    } catch (error) {
+      showError(`恢复失败: ${error.message}`);
+    }
+  }
+
+  /**
+   * 清空回收站
+   */
+  async function emptyTrash() {
+    if (!confirm('确定清空回收站吗？此操作不可恢复。')) {
+      return;
+    }
+    try {
+      const response = await sendMessage({ type: 'EMPTY_TRASH' });
+      if (response && response.success) {
+        await loadTrashView();
+      } else {
+        showError(response && response.error ? response.error : '清空失败');
+      }
+    } catch (error) {
+      showError(`清空失败: ${error.message}`);
+    }
+  }
+
+  /**
    * 显示新建工作区输入面板
    */
   function showCreatePanel() {
@@ -162,24 +252,32 @@
 
   /**
    * 切换侧边栏导航视图
-   * @param {'workspaces'|'import'} view - 目标视图
+   * @param {'workspaces'|'import'|'trash'} view - 目标视图
    */
   async function switchView(view) {
+    // 重置所有导航状态
+    navWorkspacesEl.classList.remove('active');
+    navImportEl.classList.remove('active');
+    navTrashEl.classList.remove('active');
+    importPanelEl.classList.add('hidden');
+    trashPanelEl.classList.add('hidden');
+    workspaceListEl.classList.add('hidden');
+    emptyStateEl.classList.add('hidden');
+    createPanelEl.classList.add('hidden');
+
     if (view === 'workspaces') {
       navWorkspacesEl.classList.add('active');
-      navImportEl.classList.remove('active');
-      importPanelEl.classList.add('hidden');
       workspaceListEl.classList.remove('hidden');
       emptyStateEl.classList.toggle('hidden', workspaceData.workspaces.length > 0);
       await loadAndRender();
     } else if (view === 'import') {
-      navWorkspacesEl.classList.remove('active');
       navImportEl.classList.add('active');
       importPanelEl.classList.remove('hidden');
-      workspaceListEl.classList.add('hidden');
-      emptyStateEl.classList.add('hidden');
-      createPanelEl.classList.add('hidden');
       await loadAndRenderImportableWindows();
+    } else if (view === 'trash') {
+      navTrashEl.classList.add('active');
+      trashPanelEl.classList.remove('hidden');
+      await loadTrashView();
     }
   }
 
