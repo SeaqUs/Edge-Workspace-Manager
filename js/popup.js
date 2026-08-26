@@ -44,8 +44,13 @@
   const trashEmptyEl = document.getElementById('trash-empty');
   const btnEmptyTrashEl = document.getElementById('btn-empty-trash');
 
+  // 搜索
+  const inputSearchEl = document.getElementById('input-search');
+
   // 当前数据缓存
   let workspaceData = { workspaces: [] };
+  // 搜索关键字
+  let searchQuery = '';
   // 当前可导入窗口缓存
   let importableWindows = [];
   // 存在待执行操作的工作区 ID 集合
@@ -101,6 +106,12 @@
 
     // 回收站事件
     btnEmptyTrashEl.addEventListener('click', emptyTrash);
+
+    // 搜索事件
+    inputSearchEl.addEventListener('input', (event) => {
+      searchQuery = (event.target.value || '').trim().toLowerCase();
+      renderWorkspaceList();
+    });
   }
 
   /**
@@ -474,7 +485,22 @@
 
     emptyStateEl.classList.add('hidden');
 
-    workspaceData.workspaces.forEach((ws) => {
+    // 按搜索关键字过滤工作区（匹配工作区名称或标签页标题/URL）
+    const filtered = workspaceData.workspaces.filter((ws) => {
+      if (!searchQuery) return true;
+      if ((ws.name || '').toLowerCase().includes(searchQuery)) return true;
+      return (ws.tabs || []).some(tab =>
+        (tab.title || '').toLowerCase().includes(searchQuery) ||
+        (tab.url || '').toLowerCase().includes(searchQuery)
+      );
+    });
+
+    if (filtered.length === 0 && searchQuery) {
+      emptyStateEl.classList.remove('hidden');
+      return;
+    }
+
+    filtered.forEach((ws) => {
       const card = buildWorkspaceCard(ws);
       workspaceListEl.appendChild(card);
     });
